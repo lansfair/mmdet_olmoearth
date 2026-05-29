@@ -152,11 +152,22 @@ class OlmoEarthDetMetric(BaseMetric):
     def compute_metrics(self, results: list[dict]) -> dict:
         eval_results = OrderedDict()
         num_classes = self._num_classes(results)
+        if num_classes <= 0:
+            eval_results["best_f1"] = 0.0
+            eval_results["best_precision"] = 0.0
+            eval_results["best_recall"] = 0.0
+            eval_results["best_score_thr"] = 0.0
+            eval_results["iou_thr"] = self.iou_thr
+            return eval_results
+
         best = {
-            "f1": -1.0,
+            "f1": 0.0,
             "precision": 0.0,
             "recall": 0.0,
-            "score_thr": 0.0,
+            "score_thr": self.score_thresholds[0],
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
         }
 
         for score_thr in self.score_thresholds:
@@ -178,11 +189,17 @@ class OlmoEarthDetMetric(BaseMetric):
                     "precision": precision,
                     "recall": recall,
                     "score_thr": score_thr,
+                    "tp": tp,
+                    "fp": fp,
+                    "fn": fn,
                 }
 
         eval_results["best_f1"] = best["f1"]
         eval_results["best_precision"] = best["precision"]
         eval_results["best_recall"] = best["recall"]
         eval_results["best_score_thr"] = best["score_thr"]
+        eval_results["best_tp"] = best["tp"]
+        eval_results["best_fp"] = best["fp"]
+        eval_results["best_fn"] = best["fn"]
         eval_results["iou_thr"] = self.iou_thr
         return eval_results

@@ -3,6 +3,10 @@
 This project migrates the rslearn OLMoEarth detection path into MMDetection.
 It also includes a conventional OpenMMLab RGB detection example for DIOR.
 
+For a broader Chinese walkthrough covering both MMSegmentation and
+MMDetection, see
+`projects/olmoearth/docs/olmoearth_openmmlab_migration_zh.md`.
+
 The initial target is the rslearn detection stack:
 
 - `rslearn.train.tasks.detection.DetectionTask`
@@ -57,6 +61,14 @@ data/rslearn_detection_manifest/
 Each split JSON is a manifest with `metainfo` and `samples`. A sample stores
 `img_paths`, `height`, `width`, `bboxes` in xyxy format, zero-based `labels`,
 `valid`, timestamps, present bands, and rslearn metadata.
+
+Before training, smoke-check the converted manifest:
+
+```bash
+python projects/olmoearth/tools/check_converted_det_dataset.py \
+  --data-root data/rslearn_detection_manifest \
+  --ann-file train.json
+```
 
 ## rslearn Train
 
