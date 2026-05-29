@@ -141,6 +141,233 @@ OpenMMLab 原生语义是：
 因此本项目让 OLMoEarth backbone 自己用 `init_cfg` 加载 `weights.pth`，
 这比在 config 里自定义 `model_path/model_id/checkpoint_path` 更符合框架。
 
+## 数据集迁移：到底在迁什么
+
+OpenMMLab 的 Dataset 并不是“读一个文件就完了”。它要和 sampler、pipeline、
+data preprocessor、metric、visualizer、resume/debug 工具一起工作。因此数据集
+迁移的目标不是复刻原项目的 Python Dataset，而是把原项目的任务语义变成
+OpenMMLab 能稳定消费的标准样本字典。
+
+### 迁移前：原项目里数据通常长什么样
+
+OLMoEarth/rslearn 侧的数据不是一个统一的图片目录。常见来源有三类：
+
+| 来源 | 原始形态 | 里面真正重要的语义 |
+| --- | --- | --- |
+| OLMoEarth 预处理 eval 张量 | `.pt`、`.pth`、`.npy` 或项目内部 tensor | 已裁剪好的 image、label、valid mask、months |
+| rslearn 项目数据 | dataset root + raster layers + vector layers + split tags | layer 名、band、时间范围、vector label、valid |
+| OpenMMLab 常规数据 | PNG/JPG/TIF + label/XML/COCO | 图片路径、类别映射、mask 或 bbox |
+
+如果直接把这些都塞进一个 Dataset，会出现两个问题。
+
+第一，OpenMMLab 看不到稳定的数据边界。比如 rslearn 在 `__getitem__` 里才决定
+读哪个 layer、怎么 crop、怎么把 vector 变 box。这样 OpenMMLab 的
+`filter_data`、`serialize_data`、可视化、单样本 debug 都很难可靠工作。
+
+第二，遥感任务有很多普通 COCO/VOC 不表达的信息：多时相路径、band order、
+timestamp、present bands、valid mask、ignore label、rslearn metadata。强行塞进
+COCO/VOC 字段会导致“能训练但语义不透明”。
+
+### 迁移后：manifest 是中间协议
+
+本项目用 manifest 做中间协议。它不是新的深度学习框架，只是一个可审计的样本
+清单：大数组放 GeoTIFF，JSON 只放路径和元数据。
+
+分割样本：
+
+```json
+{
+  "sample_id": "train_000000",
+  "img_paths": [
+    "samples/train_000000/t00_sentinel2_l2a.tif",
+    "samples/train_000000/t01_sentinel2_l2a.tif"
+  ],
+  "seg_map_path": "samples/train_000000/label.tif",
+  "valid_mask_path": "samples/train_000000/valid_mask.tif",
+  "timestamps": [[1, 4, 2020], [1, 5, 2020]],
+  "present_bands": ["B02", "B03", "B04", "B08"],
+  "olmoearth_modality": "sentinel2_l2a",
+  "olmoearth_num_timesteps": 2
+}
+```
+
+检测样本：
+
+```json
+{
+  "sample_id": "train_000000",
+  "img_paths": ["samples/train_000000/t00_sentinel2_l2a.tif"],
+  "height": 128,
+  "width": 128,
+  "bboxes": [[10.0, 12.0, 42.0, 50.0]],
+  "labels": [0],
+  "valid": 1,
+  "timestamps": [[1, 1, 2024]],
+  "present_bands": ["B02", "B03", "B04"],
+  "rslearn": {"source_index": 0}
+}
+```
+
+转换前后可以这样理解：
+
+| 阶段 | 转换前 | 转换后 |
+| --- | --- | --- |
+| 图像 | 内部 raster item、tensor、PNG/JPG | 每个时相一个多波段 GeoTIFF |
+| 标签 | tensor、vector layer、PNG mask、XML | `label.tif` 或 `bboxes + labels` |
+| 时间 | rslearn time_range、month tensor、缺省值 | 显式 `timestamps: T x 3` |
+| 缺失波段 | 原项目内部 mask | `present_bands` |
+| 无效区域 | `valid`、`valid_mask`、ignore label | `valid_mask_path` 或 `valid` 字段 |
+| 类别 | 原任务配置、property name | manifest `metainfo.classes` |
+
+这个格式的优势是：
+
+- 训练阶段不再依赖 rslearn 数据生命周期，OpenMMLab sampler/pipeline 可以正常工作。
+- 每个样本是什么输入、多少时相、什么 label，一眼能从 JSON 看出来。
+- GeoTIFF 能被 GIS/raster 工具查看，比 `.npz` 更适合遥感排错。
+- 分割和检测共享同一套“路径 + 元数据”思想，但不强行使用同一种标注格式。
+- 原论文任务保留 valid mask/timestamp/band order，常规数据集仍可使用原生格式。
+
+### 为什么有些数据集转 manifest，有些不转
+
+这里的判断标准不是“统一”，而是“哪个格式最少损失语义”。
+
+| 数据集类型 | 推荐方式 | 原因 |
+| --- | --- | --- |
+| PASTIS/MADOS/Sen1Floods11 | 转 manifest | 原任务有 OLMoEarth 处理后的 tensor/valid/ignore 语义 |
+| AWF/Nandi | rslearn -> manifest | 需要物化 rslearn 的 raster/vector/task 输出 |
+| rslearn detection | rslearn -> detection manifest | COCO 不能自然表达 `valid/timestamps/img_paths` |
+| Crop-Type | 可直接读 GEO-Bench，也可抽 embedding | 原 loader 能清楚表达 band stats 和 label |
+| Potsdam | 用 MMSeg Potsdam 布局 + RGB adapter | 它本来就是图片分割数据集 |
+| DIOR | 用 MMDet `XMLDataset` + RGB adapter | 它本来就是 VOC/XML 检测数据集 |
+
+换句话说：原始格式已经是 OpenMMLab 擅长的，就不要为了 OLMoEarth 强行转换；
+原始格式依赖 rslearn/OLMoEarth 内部 task 语义的，就先转换成 manifest。
+
+## 模型迁移：OpenMMLab 通常要迁哪些东西
+
+迁移一个 backbone 到 OpenMMLab，通常不是只写 `Backbone.forward`。完整链路至少
+包含下面几类组件。
+
+| 组件 | MMSeg 位置 | MMDet 位置 | 为什么需要 |
+| --- | --- | --- | --- |
+| Dataset | `DATASETS` | `DATASETS` | 把 manifest/原生数据变成样本字典 |
+| Transform | `TRANSFORMS` | `TRANSFORMS` | 读 GeoTIFF、归一化、RGB adapter、crop/pad |
+| Pack transform | `PackOlmoEarthSegInputs` | `PackDetInputs` | 把元数据放进 DataSample |
+| Data preprocessor | `OlmoEarthSegDataPreProcessor` | `DetDataPreProcessor` | pad batch、对齐 valid mask |
+| Backbone | `MODELS` | `MODELS` | 构造 OLMoEarth sample 并调用 encoder |
+| Segmentor/Detector wrapper | `OlmoEarthEncoderDecoder` | `OlmoEarthFasterRCNN` | 把 DataSample metainfo 传给 backbone |
+| Neck | `MultiLevelNeck` | `OlmoEarthMultiLevelNeck` | 单尺度 dense map 转多尺度 |
+| Head | linear/UPerHead | RPN/RoIHead | 接具体下游任务 |
+| Metric | IoU/Accuracy | F1/VOCMetric | 对齐论文或数据集指标 |
+| Hook/Tool | visualization/checker | checker | 多波段可视化和数据预检 |
+
+### 哪些 import 原项目，哪些自己写
+
+折中原则是：**数学定义和权重结构 import 原项目；框架生命周期自己写。**
+
+直接 import 原项目的部分：
+
+- `olmoearth_pretrain.config.Config`：保证模型结构和 released `config.json` 对齐。
+- `patch_legacy_encoder_config`：兼容官方 config。
+- `MaskedOlmoEarthSample` / `MaskValue`：保证 sample 和 mask 语义不变。
+- `PoolingType` / `pool_unmasked_tokens`：保证 token pooling 逻辑不重写。
+- OLMoEarth computed normalization 参数：保证输入尺度对齐预训练。
+
+自己写 OpenMMLab 适配的部分：
+
+- Dataset / manifest loader：OpenMMLab 需要自己的 `load_data_list/filter_data`。
+- Transform：OpenMMLab pipeline 负责 image/label 同步增强和元数据传递。
+- Backbone wrapper：把 `B,C*T,H,W` 还原成 OLMoEarth 的 `B,H,W,T,C`。
+- Segmentor/Detector wrapper：OpenMMLab 默认不会把 timestamps 传给 backbone。
+- Neck/head config：让 dense map 接 UPerNet/Faster R-CNN。
+- Metric/checker：保留 valid mask、rslearn F1 这类非标准语义。
+
+不建议 import 的部分：
+
+- rslearn `ModelDataset` 作为训练 Dataset。
+- OLMoEarth 原生 FSDP/DDP 封装。
+- 原项目训练 loop、optimizer 封装、环境变量读取。
+
+原因是这些东西属于训练框架生命周期。OpenMMLab 已经有 runner、sampler、
+hook、DDP、AMP、checkpoint 语义；硬搬会让两个框架互相抢控制权。
+
+## 推理和训练的 forward 逻辑
+
+### MMSeg online forward
+
+MMSeg online 路径可以按这个顺序理解：
+
+```text
+manifest sample
+  -> OlmoEarthSegDataset.load_data_list()
+  -> LoadOlmoEarthArrays
+       img_paths: T 个 GeoTIFF
+       stack: T,C,H,W
+       flatten: H,W,C*T
+       label/valid_mask/timestamps 一起放入 results
+  -> Normalize / Crop / Pad / Flip
+  -> PackOlmoEarthSegInputs
+       inputs: C*T,H,W
+       SegDataSample.metainfo: timestamps/present_bands/...
+  -> OlmoEarthSegDataPreProcessor
+       batch pad inputs/labels/valid_mask
+  -> OlmoEarthEncoderDecoder.loss/predict
+       set_batch_metainfo(data_samples.metainfo)
+  -> OlmoEarthBackbone.forward(inputs)
+       reshape: B,C*T,H,W -> B,H,W,T,C
+       build bandset_mask from present_bands
+       build timestamps tensor
+       MaskedOlmoEarthSample(...)
+       encoder(sample, fast_pass=auto, patch_size=...)
+       pool_unmasked_tokens(...)
+       output: (B,D,H/patch,W/patch,)
+  -> decode_head / auxiliary_head
+  -> loss or prediction
+```
+
+这里最关键的是 `OlmoEarthEncoderDecoder`。普通 `EncoderDecoder` 只会把 image
+tensor 传给 backbone，不知道 timestamps 和 present bands。我们加 wrapper 的
+目的就是把 `SegDataSample.metainfo` 临时塞给 backbone。
+
+### MMSeg offline embedding forward
+
+offline probe 则把 encoder forward 前移到抽特征阶段：
+
+```text
+原始样本 -> extract_embeddings.py -> embedding.tif
+embedding.tif -> OlmoEarthFeatureBackbone -> patch-linear head
+```
+
+优势是训练阶段不再反复跑 OLMoEarth encoder，更接近论文的线性探针评估方式。
+代价是 embedding 固定，不能端到端微调 backbone。
+
+### MMDet forward
+
+MMDet 检测路径类似，但后面接的是 detector：
+
+```text
+detection manifest / XMLDataset
+  -> LoadOlmoEarthTifFromFile 或 LoadImageFromFile
+  -> OlmoEarthNormalize 或 RGBToOlmoEarthS2
+  -> LoadAnnotations
+  -> PackDetInputs
+       DetDataSample.metainfo: timestamps/present_bands/...
+  -> DetDataPreProcessor
+  -> OlmoEarthFasterRCNN.loss/predict
+       set_batch_metainfo(data_samples.metainfo)
+  -> OlmoEarthBackbone.forward
+       output one dense feature map
+  -> OlmoEarthMultiLevelNeck
+       one map -> strides [p, 2p, 4p, 8p]
+  -> RPNHead
+  -> RoIHead
+  -> bbox loss or predictions
+```
+
+为什么 MMDet 需要 neck：Faster R-CNN/FPN 系列默认消费多尺度 feature。OlmoEarth
+不像 ResNet 那样天然输出 C2/C3/C4/C5，所以需要把单个 dense map 派生成多个尺度。
+这不是让 OlmoEarth 真的变成 FPN backbone，而是满足 RPN/RoIHead 的接口假设。
+
 ## 迁移到 MMSegmentation
 
 ### 数据集准备
