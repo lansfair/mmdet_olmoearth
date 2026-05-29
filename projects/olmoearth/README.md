@@ -1,6 +1,7 @@
 # OLMoEarth for MMDetection
 
 This project migrates the rslearn OLMoEarth detection path into MMDetection.
+It also includes a conventional OpenMMLab RGB detection example for DIOR.
 
 The initial target is the rslearn detection stack:
 
@@ -12,7 +13,11 @@ The initial target is the rslearn detection stack:
 - Inputs are Sentinel-2 L2A GeoTIFFs in OLMoEarth band order.
 - `convert_rslearn_det.py` uses rslearn `ModelDataset` and `DetectionTask` to
   produce the same patch-relative `boxes`, `labels`, and `valid` semantics, then
-  writes COCO JSON for MMDetection.
+  writes an OLMoEarth detection manifest rather than COCO.
+- `OlmoEarthDetDataset` reads that manifest directly, preserving multi-timestep
+  `img_paths`, timestamps, present bands, validity flags, and rslearn metadata.
+- `OlmoEarthDetMetric` evaluates valid rslearn samples with IoU matching and
+  reports F1, precision, and recall over score thresholds.
 - `OlmoEarthBackbone` keeps the same OLMoEarth sample construction, timestamp
   handling, present-band masks, `fast_pass` logic, and PyTorch 2.3 CUDA bool-sort
   compatibility patch used by the MMSeg project.
@@ -24,12 +29,12 @@ The initial target is the rslearn detection stack:
   `OlmoEarthMultiLevelNeck` to derive detection levels at strides
   `[patch_size, 2*patch_size, 4*patch_size, 8*patch_size]`.
 
-## Convert
+## rslearn Convert
 
 ```bash
 python projects/olmoearth/tools/convert_rslearn_det.py \
   --input-root /path/to/rslearn_dataset \
-  --output-root data/rslearn_detection_coco \
+  --output-root data/rslearn_detection_manifest \
   --image-layers sentinel2 \
   --target-layers label \
   --classes object \
@@ -39,7 +44,21 @@ python projects/olmoearth/tools/convert_rslearn_det.py \
 For point labels, pass `--box-size N` to match rslearn `DetectionTask` point to
 box conversion.
 
-## Train
+The converted layout is:
+
+```text
+data/rslearn_detection_manifest/
+  train.json
+  val.json
+  test.json
+  samples/<sample_id>/t00_sentinel2_l2a.tif
+```
+
+Each split JSON is a manifest with `metainfo` and `samples`. A sample stores
+`img_paths`, `height`, `width`, `bboxes` in xyxy format, zero-based `labels`,
+`valid`, timestamps, present bands, and rslearn metadata.
+
+## rslearn Train
 
 Edit the paths and class names at the top of:
 
@@ -52,4 +71,27 @@ Then run:
 ```bash
 python tools/train.py \
   projects/olmoearth/configs/olmoearth-base_faster-rcnn_1x_rslearn-detection-s2.py
+```
+
+## DIOR RGB Example
+
+DIOR is kept as a normal OpenMMLab XML-style dataset. The only OLMoEarth-specific
+part is the pipeline transform that maps RGB into normalized Sentinel-2 RGB
+slots before the OLMoEarth backbone.
+
+Expected layout:
+
+```text
+data/DIOR/
+  JPEGImages/*.jpg
+  Annotations/*.xml
+  ImageSets/Main/train.txt
+  ImageSets/Main/val.txt
+```
+
+Run:
+
+```bash
+python tools/train.py \
+  projects/olmoearth/configs/olmoearth-base_faster-rcnn_1x_dior-rgb.py
 ```

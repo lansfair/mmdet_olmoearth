@@ -1,3 +1,3 @@
-from .coco import OlmoEarthCocoDataset
+from .detection import OlmoEarthDetDataset
 
-__all__ = ["OlmoEarthCocoDataset"]
+__all__ = ["OlmoEarthDetDataset"]

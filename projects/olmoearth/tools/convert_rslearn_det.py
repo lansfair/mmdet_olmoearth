@@ -223,9 +223,9 @@ def _resolve_timestamps(
     raise ValueError("timestamp_mode must be 'legacy' or 'actual'")
 
 
-def _bbox_xyxy_to_coco(box: np.ndarray) -> list[float]:
+def _valid_xyxy_box(box: np.ndarray) -> bool:
     x1, y1, x2, y2 = [float(v) for v in box]
-    return [x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)]
+    return x2 > x1 and y2 > y1
 
 
 def _convert_split(
@@ -234,11 +234,10 @@ def _convert_split(
     manifest_name: str,
     spec: DetectionSpec,
     classes: list[str],
+    property_name: str,
     timestamp_mode: str,
 ) -> dict[str, Any]:
-    images = []
-    annotations = []
-    ann_id = 1
+    samples = []
 
     for idx in range(len(rslearn_dataset)):
         input_dict, target_dict, metadata = rslearn_dataset[idx]
@@ -273,21 +272,29 @@ def _convert_split(
         )
         rel_paths = [f"samples/{sample_id}/{path}" for path in image_paths]
 
-        image_id = idx + 1
-        images.append(
+        out_boxes = []
+        out_labels = []
+        for box, label in zip(boxes, labels):
+            if not valid or not _valid_xyxy_box(box):
+                continue
+            out_boxes.append([float(v) for v in box])
+            out_labels.append(int(label))
+
+        samples.append(
             {
-                "id": image_id,
-                "img_id": image_id,
-                "file_name": rel_paths[0],
+                "sample_id": sample_id,
+                "img_id": idx + 1,
                 "img_paths": rel_paths,
                 "height": height,
                 "width": width,
+                "bboxes": out_boxes,
+                "labels": out_labels,
+                "valid": valid,
                 "timestamps": timestamps.tolist(),
                 "present_bands": S2_BANDS,
                 "olmoearth_modality": "sentinel2_l2a",
                 "olmoearth_num_timesteps": int(image.shape[1]),
                 "olmoearth_band_names": S2_BANDS,
-                "valid": valid,
                 "rslearn": {
                     **_metadata_to_dict(metadata),
                     "source_index": idx,
@@ -297,44 +304,26 @@ def _convert_split(
             }
         )
 
-        if not valid:
-            continue
-        for box, label in zip(boxes, labels):
-            bbox = _bbox_xyxy_to_coco(box)
-            if bbox[2] <= 0 or bbox[3] <= 0:
-                continue
-            annotations.append(
-                {
-                    "id": ann_id,
-                    "image_id": image_id,
-                    "category_id": int(label) + 1,
-                    "bbox": bbox,
-                    "area": bbox[2] * bbox[3],
-                    "iscrowd": 0,
-                }
-            )
-            ann_id += 1
-
     return {
-        "images": images,
-        "annotations": annotations,
-        "categories": [
-            {"id": class_idx + 1, "name": class_name}
-            for class_idx, class_name in enumerate(classes)
-        ],
-        "info": {
+        "metainfo": {
             "dataset": spec.dataset_name,
             "split": manifest_name,
-            "format": "olmoearth_rslearn_detection_coco",
+            "format": "olmoearth_rslearn_detection_manifest",
+            "classes": classes,
+            "property_name": property_name,
+            "box_format": "xyxy",
+            "label_offset": 0,
         },
+        "samples": samples,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert an rslearn DetectionTask dataset into COCO JSON plus "
-            "OLMoEarth multi-timestep GeoTIFF imagery for MMDetection."
+            "Convert an rslearn DetectionTask dataset into OLMoEarth "
+            "detection manifests plus multi-timestep GeoTIFF imagery for "
+            "MMDetection."
         )
     )
     parser.add_argument("--dataset", default="generic", choices=DATASET_SPECS)
@@ -369,8 +358,7 @@ def main() -> None:
 
     input_root = Path(args.input_root)
     output_root = Path(args.output_root)
-    ann_dir = output_root / "annotations"
-    ann_dir.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
 
     split_summaries = {}
     for manifest_name, split_tag in spec.split_tags.items():
@@ -390,18 +378,21 @@ def main() -> None:
             skip_unknown_categories=args.skip_unknown_categories,
             skip_empty_examples=args.skip_empty_examples,
         )
-        coco = _convert_split(
+        manifest = _convert_split(
             rslearn_dataset=rslearn_dataset,
             output_root=output_root,
             manifest_name=manifest_name,
             spec=spec,
             classes=classes,
+            property_name=property_name,
             timestamp_mode=args.timestamp_mode,
         )
-        save_json(ann_dir / f"{manifest_name}.json", coco)
+        save_json(output_root / f"{manifest_name}.json", manifest)
         split_summaries[manifest_name] = {
-            "images": len(coco["images"]),
-            "annotations": len(coco["annotations"]),
+            "samples": len(manifest["samples"]),
+            "boxes": sum(
+                len(sample["bboxes"]) for sample in manifest["samples"]
+            ),
         }
 
     save_json(

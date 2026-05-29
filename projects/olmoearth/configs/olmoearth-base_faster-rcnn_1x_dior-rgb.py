@@ -3,101 +3,118 @@ custom_imports = dict(
     allow_failed_imports=False,
 )
 
-data_root = "data/rslearn_detection_manifest"
+data_root = "data/DIOR"
 olmoearth_model_dir = "checkpoints/olmoearth"
 model_config_path = f"{olmoearth_model_dir}/config.json"
 weights_path = f"{olmoearth_model_dir}/weights.pth"
-work_dir = "./work_dirs/olmoearth-base_faster-rcnn_rslearn-detection-s2"
+work_dir = "./work_dirs/olmoearth-base_faster-rcnn_dior-rgb"
 
-classes = ("object",)
+classes = (
+    "airplane",
+    "airport",
+    "baseballfield",
+    "basketballcourt",
+    "bridge",
+    "chimney",
+    "dam",
+    "Expressway-Service-area",
+    "Expressway-toll-station",
+    "golffield",
+    "groundtrackfield",
+    "harbor",
+    "overpass",
+    "ship",
+    "stadium",
+    "storagetank",
+    "tenniscourt",
+    "trainstation",
+    "vehicle",
+    "windmill",
+)
 num_classes = len(classes)
 num_timesteps = 1
 patch_size = 8
-image_size = 128
 out_channels = 768
 fpn_channels = 256
 featmap_strides = [patch_size, patch_size * 2, patch_size * 4, patch_size * 8]
 anchor_sizes = [32, 64, 128, 256]
 
 metainfo = dict(classes=classes)
+backend_args = None
 
 train_pipeline = [
-    dict(type="LoadOlmoEarthTifFromFile"),
-    dict(
-        type="OlmoEarthNormalize",
-        modality="sentinel2_l2a",
-        num_timesteps=num_timesteps,
-    ),
+    dict(type="LoadImageFromFile", backend_args=backend_args),
     dict(type="LoadAnnotations", with_bbox=True),
+    dict(type="Resize", scale=(800, 800), keep_ratio=True),
     dict(type="RandomFlip", prob=0.5),
+    dict(
+        type="RGBToOlmoEarthS2",
+        num_timesteps=num_timesteps,
+        rgb_channel_order="BGR",
+        input_value_range="0_255",
+    ),
     dict(
         type="PackDetInputs",
         meta_keys=(
             "img_id",
-            "sample_id",
             "img_path",
             "ori_shape",
             "img_shape",
             "scale_factor",
             "flip",
             "flip_direction",
-            "timestamps",
             "present_bands",
-            "valid",
             "olmoearth_modality",
             "olmoearth_num_timesteps",
             "olmoearth_band_names",
-            "rslearn",
+            "olmoearth_rgb_adapter",
         ),
     ),
 ]
 
 test_pipeline = [
-    dict(type="LoadOlmoEarthTifFromFile"),
-    dict(
-        type="OlmoEarthNormalize",
-        modality="sentinel2_l2a",
-        num_timesteps=num_timesteps,
-    ),
+    dict(type="LoadImageFromFile", backend_args=backend_args),
+    dict(type="Resize", scale=(800, 800), keep_ratio=True),
     dict(type="LoadAnnotations", with_bbox=True),
+    dict(
+        type="RGBToOlmoEarthS2",
+        num_timesteps=num_timesteps,
+        rgb_channel_order="BGR",
+        input_value_range="0_255",
+    ),
     dict(
         type="PackDetInputs",
         meta_keys=(
             "img_id",
-            "sample_id",
             "img_path",
             "ori_shape",
             "img_shape",
             "scale_factor",
-            "timestamps",
             "present_bands",
-            "valid",
             "olmoearth_modality",
             "olmoearth_num_timesteps",
             "olmoearth_band_names",
-            "rslearn",
+            "olmoearth_rgb_adapter",
         ),
     ),
 ]
 
+dataset_type = "XMLDataset"
 train_dataloader = dict(
-    batch_size=8,
+    batch_size=4,
     num_workers=8,
     persistent_workers=True,
     sampler=dict(type="DefaultSampler", shuffle=True),
     batch_sampler=dict(type="AspectRatioBatchSampler"),
     dataset=dict(
-        type="OlmoEarthDetDataset",
+        type=dataset_type,
         data_root=data_root,
-        ann_file="train.json",
-        data_prefix=dict(img=""),
+        ann_file="ImageSets/Main/train.txt",
+        data_prefix=dict(sub_data_root=""),
         metainfo=metainfo,
-        filter_cfg=dict(
-            filter_empty_gt=False,
-            filter_invalid=True,
-            min_size=1,
-        ),
+        filter_cfg=dict(filter_empty_gt=True, min_size=32, bbox_min_size=1),
         pipeline=train_pipeline,
+        backend_args=backend_args,
     ),
 )
 
@@ -108,23 +125,19 @@ val_dataloader = dict(
     drop_last=False,
     sampler=dict(type="DefaultSampler", shuffle=False),
     dataset=dict(
-        type="OlmoEarthDetDataset",
+        type=dataset_type,
         data_root=data_root,
-        ann_file="val.json",
-        data_prefix=dict(img=""),
+        ann_file="ImageSets/Main/val.txt",
+        data_prefix=dict(sub_data_root=""),
         metainfo=metainfo,
         test_mode=True,
         pipeline=test_pipeline,
+        backend_args=backend_args,
     ),
 )
 test_dataloader = val_dataloader
 
-val_evaluator = dict(
-    type="OlmoEarthDetMetric",
-    num_classes=num_classes,
-    iou_thr=0.5,
-    score_thresholds=[0.05, 0.1, 0.2, 0.3, 0.5],
-)
+val_evaluator = dict(type="VOCMetric", metric="mAP", eval_mode="area")
 test_evaluator = val_evaluator
 
 model = dict(
@@ -311,3 +324,4 @@ log_processor = dict(type="LogProcessor", window_size=50, by_epoch=True)
 log_level = "INFO"
 load_from = None
 resume = False
+auto_scale_lr = dict(enable=False, base_batch_size=16)

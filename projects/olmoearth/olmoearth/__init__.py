@@ -1,6 +1,7 @@
 from .backbones import OlmoEarthBackbone
-from .datasets import OlmoEarthCocoDataset
+from .datasets import OlmoEarthDetDataset
 from .detectors import OlmoEarthFasterRCNN
+from .metrics import OlmoEarthDetMetric
 from .necks import OlmoEarthMultiLevelNeck
 from .transforms import (
     LoadOlmoEarthTifFromFile,
@@ -10,8 +11,9 @@ from .transforms import (
 
 __all__ = [
     "OlmoEarthBackbone",
-    "OlmoEarthCocoDataset",
+    "OlmoEarthDetDataset",
     "OlmoEarthFasterRCNN",
+    "OlmoEarthDetMetric",
     "OlmoEarthMultiLevelNeck",
     "LoadOlmoEarthTifFromFile",
     "OlmoEarthNormalize",
