@@ -1,14 +1,18 @@
 # OlmoEarth -> MMSeg / MMDet / MMRotate 迁移教程
 
 这份文档面向想学习“如何把一个非 OpenMMLab 模型迁移到 MMSeg / MMDet /
-MMRotate，并尽量复现实验”的读者。它不是只告诉你哪条命令能跑，而是拆开
-迁移时必须处理的边界：数据格式、模型 forward、权重加载、训练范式、评估语义。
+MMRotate，并尽量复现实验”的读者。OlmoEarth 是这里的案例；真正要学习的是一套
+迁移方法：先拆原项目的数据、模型、训练、评估 contract，再决定哪些逻辑保留原实现，
+哪些逻辑改写成 OpenMMLab 原生组件。
 
-OlmoEarth 只是这里的案例。真正希望读者学会的是：面对一个原项目模型时，如何判断
-哪些逻辑应该保留原实现，哪些逻辑应该改写成 OpenMMLab 原生组件，以及哪些改动会
-影响论文结果复现。
+为了避免“内容都有但路线混乱”，本文按迁移工作的自然顺序组织：先讲通用方法论，
+再讲 OlmoEarth 的特殊性，然后分别落到数据、模型、recipes、验证和 debug。
 
-## 教程目标
+## 0. 读者定位与路线图
+
+先确定这篇教程在教什么、读者该怎么选框架和 config。
+
+### 教程目标
 
 读完以后应该能回答五个问题：
 
@@ -37,7 +41,7 @@ OlmoEarth 只是这里的案例。真正希望读者学会的是：面对一个�
 只要这四个 contract 写清楚，迁移其他 foundation model、遥感模型或普通视觉模型时，
 也可以沿用同样的分析方法。
 
-## 如何阅读这份教程
+### 如何阅读这份教程
 
 这份教程建议按三条路线阅读，不要一开始就把所有任务混在一起。
 
@@ -57,7 +61,7 @@ OlmoEarth 只是这里的案例。真正希望读者学会的是：面对一个�
 | `Annotations/Oriented Bounding Boxes/*.xml`，里面是 `robndbox` | MMRotate `DIORDataset` |
 | `annfiles/*.txt`，每行 `x1 y1 ... x4 y4 class difficult` | MMRotate `DOTADataset` |
 
-### 路线 A：先跑通一个 OpenMMLab 实验
+#### 路线 A：先跑通一个 OpenMMLab 实验
 
 适合已经熟悉 OpenMMLab，但还不了解 OlmoEarth 的读者。推荐从 RGB 数据集开始：
 
@@ -72,7 +76,7 @@ DIOR / Potsdam
 这条路线最快，因为不需要先理解 rslearn，也不需要写转换脚本。它的目标是先确认
 环境、权重、registry、forward 都能跑通。
 
-### 路线 B：复现 OlmoEarth 论文下游任务
+#### 路线 B：复现 OlmoEarth 论文下游任务
 
 适合关心论文精度对齐的读者。推荐从 PASTIS 或 Crop-Type 开始：
 
@@ -91,7 +95,7 @@ AWF / Nandi
 这条路线要优先对齐 label、valid mask、timestamp、band order 和 metric。只要这些
 语义错了，即使模型代码能跑，精度也没有可比性。
 
-### 路线 C：迁移自己的遥感数据集
+#### 路线 C：迁移自己的遥感数据集
 
 适合要把新数据接到 OlmoEarth 的读者。先回答下面几个问题：
 
@@ -118,7 +122,7 @@ AWF / Nandi
 这个决策树比“所有数据都转成同一种格式”更重要。迁移不是追求形式统一，而是
 尽量少损失原任务语义，同时尽量多复用 OpenMMLab 的训练生态。
 
-### Config 导航表
+#### Config 导航表
 
 学习迁移时，建议先把每个 config 放进正确语境里：
 
@@ -140,7 +144,11 @@ AWF / Nandi
 表里的“否”不是说实验没有价值，而是提醒：RGB adapter 或常规遥感图片数据集不等于
 OLMoEarth 论文中的多光谱/多时相设置，结果不能直接当成论文复现数值。
 
-## 环境准备
+## 1. 环境与复现前提
+
+环境、权重和依赖是所有迁移工作的前置条件。
+
+### 环境准备
 
 推荐把 OpenMMLab 和 OlmoEarth 放在同一个环境里，避免权重和依赖在不同
 Python 环境之间来回找。
@@ -168,44 +176,72 @@ backbone 的 `init_cfg` 加载。不要把 OLMoEarth 的 `weights.pth` 放到
 OpenMMLab 顶层 `load_from`，因为 `load_from` 表示加载完整 OpenMMLab 模型，
 不是只加载 backbone。
 
-## OlmoEarth 简介
+## 2. OpenMMLab 迁移方法论
 
-普通视觉 backbone 通常接收：
+这一部分抽象出可迁移到其他模型的通用方法，而不是只服务 OlmoEarth。
+
+### 通用迁移模板
+
+如果把 OlmoEarth 换成另一个非 OpenMMLab 模型，也可以按同样顺序迁移。
+
+#### Step 1：拆原项目
+
+先不要急着写 OpenMMLab config，先回答：
+
+| 问题 | 为什么重要 |
+| --- | --- |
+| 原项目 Dataset 最终返回什么字段 | 决定是否转 manifest、写 Dataset、还是用原生 Dataset |
+| 模型 `forward` 真实需要哪些输入 | 决定 backbone wrapper 要从 DataSample metainfo 里拿什么 |
+| 权重文件是什么结构 | 决定用 `init_cfg`、自定义 `init_weights`，还是顶层 `load_from` |
+| 训练时哪些模块冻结 | 决定 optimizer paramwise、`requires_grad` 和复现设置 |
+| metric 如何计算 | 决定用 OpenMMLab 原生 metric 还是自定义 metric |
+
+#### Step 2：定 OpenMMLab 边界
+
+迁移时尽量让 OpenMMLab 管 OpenMMLab 擅长的部分：
+
+| 交给 OpenMMLab | 从原项目保留 |
+| --- | --- |
+| runner、optimizer、hook、DDP、AMP、checkpoint | 模型结构、权重命名、核心数学算子 |
+| Dataset 生命周期、sampler、pipeline、DataSample | 特殊输入语义，如 timestamp、mask、band order |
+| 原生 metric，如 IoU/VOC/DOTA | 原论文特有 valid mask、F1、ignore 规则 |
+
+如果一个逻辑影响论文精度，就不要为了“更像 OpenMMLab”随便改；如果一个逻辑只是
+训练工程控制，就应该尽量交给 OpenMMLab。
+
+#### Step 3：先建最小闭环
+
+最小闭环不是完整训练，而是：
 
 ```text
-image: B x C x H x W
+config 可解析
+  -> Dataset 能取一个样本
+  -> pipeline 后 tensor shape 正确
+  -> model 能算一次 loss
+  -> metric 能跑一次 val
 ```
 
-OlmoEarth 在预训练中接收的是带 modality、time、band、mask 的样本：
+只有这个闭环稳定后，再讨论长训练、调参和复现实验。
 
-```text
-sentinel2_l2a:      B x H x W x T x C
-sentinel2_l2a_mask: B x H x W x T x bandset
-timestamps:         B x T x 3
-```
+#### Step 4：写清楚复现边界
 
-这带来几个迁移差异。
+每个 config 都应该能回答：
 
-### 与 ResNet / 普通 ViT 的差异
+| 问题 | 例子 |
+| --- | --- |
+| 是否论文复现 | PASTIS/Crop-Type linear probe 是，Potsdam/DIOR RGB 不是 |
+| 是否冻结 backbone | linear probe 冻结，UPerNet/检测实验可训练 |
+| 输入是否同分布 | Sentinel-2 是，RGB adapter 不是 |
+| metric 是否同原论文 | valid-mask IoU/F1 需要特别说明 |
+| 是否有离线缓存 | embedding 有，online 训练没有 |
 
-| 问题 | 普通 ResNet / ViT | OlmoEarth |
-| --- | --- | --- |
-| 输入 | 3 通道 RGB 或固定多通道 | modality + 多时相 + 多波段 |
-| 缺失波段 | 通常不表达 | 通过 mask 表达 online / missing |
-| 时间信息 | 通常没有 | `timestamps` 是前向输入的一部分 |
-| 输出 | 多尺度或单尺度 feature | dense token map，尺度约为 `1 / patch_size` |
-| 下游适配 | 直接接 FPN/UPerNet | 需要 pooling、mask、neck 或 head 适配 |
+这样其他人学习迁移时，看到一个结果就知道它代表什么，也知道不能和哪些结果直接比较。
 
-一个容易误解的点是：OlmoEarth 可以输入单时相。`T` 不是必须大于 1；
-只要 `timestamps`、图像张量和 mask 的 T 维一致即可。因此 RGB / DIOR /
-Potsdam 这类单图数据可以走单时相适配，但这属于 out-of-domain 实验，不等于
-复现论文里的多时相遥感设定。
-
-## 迁移总原则
+### 迁移总原则
 
 本项目最终采用四条原则。
 
-### 1. 非侵入式 projects 迁移
+#### 1. 非侵入式 projects 迁移
 
 不改 OpenMMLab 主干代码，所有新增逻辑放在：
 
@@ -226,7 +262,7 @@ custom_imports = dict(
 
 注册 Dataset、Backbone、Transform、Metric、Hook。
 
-### 2. 训练时不用 rslearn Dataset
+#### 2. 训练时不用 rslearn Dataset
 
 迁移早期有一个诱惑：直接在 OpenMMLab Dataset 里包
 `rslearn.train.dataset.ModelDataset`。最后没有这么做。
@@ -241,7 +277,7 @@ custom_imports = dict(
 本项目选择第二种。转换脚本只负责把原任务语义物化出来，训练阶段只读
 GeoTIFF 和 JSON manifest。
 
-### 3. 原论文任务优先对齐语义，常规数据集走原生格式
+#### 3. 原论文任务优先对齐语义，常规数据集走原生格式
 
 分割里的 PASTIS/AWF/Nandi/MADOS/Sen1Floods11、检测里的 rslearn detection，
 都保留原任务的 label、valid mask、时间戳和多波段输入。
@@ -255,7 +291,7 @@ DIOR、DOTA、Potsdam 这种常规 OpenMMLab 数据集，则尽量走原生 Data
 
 不要为了“所有数据集统一”而把 DIOR/DOTA/Potsdam 也强行转成 rslearn 格式。
 
-### 4. `init_cfg` 加载 OLMoEarth 权重
+#### 4. `init_cfg` 加载 OLMoEarth 权重
 
 OpenMMLab 原生语义是：
 
@@ -266,14 +302,232 @@ OpenMMLab 原生语义是：
 因此本项目让 OLMoEarth backbone 自己用 `init_cfg` 加载 `weights.pth`，
 这比在 config 里自定义 `model_path/model_id/checkpoint_path` 更符合框架。
 
-## 数据集迁移：到底在迁什么
+### 模型迁移：OpenMMLab 通常要迁哪些东西
+
+迁移一个 backbone 到 OpenMMLab，通常不是只写 `Backbone.forward`。完整链路至少
+包含下面几类组件。
+
+| 组件 | MMSeg 位置 | MMDet 位置 | MMRotate 位置 | 为什么需要 |
+| --- | --- | --- | --- | --- |
+| Dataset | `DATASETS` | `DATASETS` | `DATASETS` | 把 manifest/原生数据变成样本字典 |
+| Transform | `TRANSFORMS` | `TRANSFORMS` | `TRANSFORMS` | 读 GeoTIFF、归一化、RGB adapter、crop/pad |
+| Pack transform | `PackOlmoEarthSegInputs` | `PackDetInputs` | `PackDetInputs` | 把元数据放进 DataSample |
+| Data preprocessor | `OlmoEarthSegDataPreProcessor` | `DetDataPreProcessor` | `DetDataPreProcessor` | pad batch、对齐 valid mask 或 box tensor |
+| Backbone | `MODELS` | `MODELS` | `MODELS` | 构造 OLMoEarth sample 并调用 encoder |
+| Segmentor/Detector wrapper | `OlmoEarthEncoderDecoder` | `OlmoEarthFasterRCNN` | `OlmoEarthFasterRCNN` | 把 DataSample metainfo 传给 backbone |
+| Neck | `MultiLevelNeck` | `OlmoEarthMultiLevelNeck` | `OlmoEarthMultiLevelNeck` | 单尺度 dense map 转多尺度 |
+| Head | linear/UPerHead | RPN/RoIHead | OrientedRPN/RotatedRoIHead | 接具体下游任务 |
+| Metric | IoU/Accuracy | F1/VOCMetric | DOTAMetric | 对齐论文或数据集指标 |
+| Hook/Tool | visualization/checker | checker | 原生 DOTA/DIOR 检查 + smoke train | 多波段可视化和数据预检 |
+
+#### 哪些 import 原项目，哪些自己写
+
+折中原则是：**数学定义和权重结构 import 原项目；框架生命周期自己写。**
+
+直接 import 原项目的部分：
+
+- `olmoearth_pretrain.config.Config`：保证模型结构和 released `config.json` 对齐。
+- `patch_legacy_encoder_config`：兼容官方 config。
+- `MaskedOlmoEarthSample` / `MaskValue`：保证 sample 和 mask 语义不变。
+- `PoolingType` / `pool_unmasked_tokens`：保证 token pooling 逻辑不重写。
+- OLMoEarth computed normalization 参数：保证输入尺度对齐预训练。
+
+自己写 OpenMMLab 适配的部分：
+
+- Dataset / manifest loader：OpenMMLab 需要自己的 `load_data_list/filter_data`。
+- Transform：OpenMMLab pipeline 负责 image/label 同步增强和元数据传递。
+- Backbone wrapper：把 `B,C*T,H,W` 还原成 OLMoEarth 的 `B,H,W,T,C`。
+- Segmentor/Detector wrapper：OpenMMLab 默认不会把 timestamps 传给 backbone。
+- Neck/head config：让 dense map 接 UPerNet/Faster R-CNN。
+- Metric/checker：保留 valid mask、rslearn F1 这类非标准语义。
+
+不建议 import 的部分：
+
+- rslearn `ModelDataset` 作为训练 Dataset。
+- OLMoEarth 原生 FSDP/DDP 封装。
+- 原项目训练 loop、optimizer 封装、环境变量读取。
+
+原因是这些东西属于训练框架生命周期。OpenMMLab 已经有 runner、sampler、
+hook、DDP、AMP、checkpoint 语义；硬搬会让两个框架互相抢控制权。
+
+## 3. OlmoEarth 案例难点
+
+理解 OlmoEarth 为什么不能像普通 ResNet/ViT 一样直接塞进 OpenMMLab。
+
+### OlmoEarth 简介
+
+普通视觉 backbone 通常接收：
+
+```text
+image: B x C x H x W
+```
+
+OlmoEarth 在预训练中接收的是带 modality、time、band、mask 的样本：
+
+```text
+sentinel2_l2a:      B x H x W x T x C
+sentinel2_l2a_mask: B x H x W x T x bandset
+timestamps:         B x T x 3
+```
+
+这带来几个迁移差异。
+
+#### 与 ResNet / 普通 ViT 的差异
+
+| 问题 | 普通 ResNet / ViT | OlmoEarth |
+| --- | --- | --- |
+| 输入 | 3 通道 RGB 或固定多通道 | modality + 多时相 + 多波段 |
+| 缺失波段 | 通常不表达 | 通过 mask 表达 online / missing |
+| 时间信息 | 通常没有 | `timestamps` 是前向输入的一部分 |
+| 输出 | 多尺度或单尺度 feature | dense token map，尺度约为 `1 / patch_size` |
+| 下游适配 | 直接接 FPN/UPerNet | 需要 pooling、mask、neck 或 head 适配 |
+
+一个容易误解的点是：OlmoEarth 可以输入单时相。`T` 不是必须大于 1；
+只要 `timestamps`、图像张量和 mask 的 T 维一致即可。因此 RGB / DIOR /
+Potsdam 这类单图数据可以走单时相适配，但这属于 out-of-domain 实验，不等于
+复现论文里的多时相遥感设定。
+
+### RGB 输入如何适配 OlmoEarth
+
+RGB 是本项目里最需要强调边界的适配。它的目的不是把 RGB 数据“变成真实
+Sentinel-2”，而是让 Potsdam、DIOR 这类普通 RGB 遥感数据能走同一个
+OlmoEarth backbone 接口。
+
+#### 为什么需要 adapter
+
+OlmoEarth 的 Sentinel-2 L2A 分支期望的是 12 个 band：
+
+```text
+B02, B03, B04, B08, B05, B06, B07, B8A, B11, B12, B01, B09
+```
+
+普通 RGB 图像只有 3 个通道，没有近红外、红边、SWIR，也没有真实的 Sentinel-2
+辐射尺度。如果直接把 RGB 当成前三个 S2 band 输入，会同时错两个东西：
+
+- band 语义错：RGB 的 R/G/B 不等于 OLMoEarth band order 的前三个 B02/B03/B04。
+- 数值尺度错：PNG/JPG 通常是 0-255，OLMoEarth S2 归一化按 0-10000 反射率尺度。
+
+所以我们显式写了 `RGBToOlmoEarthS2`，让这种适配在 config 里可见，而不是
+悄悄藏在 Dataset 里。
+
+#### 映射规则
+
+映射关系固定为：
+
+```text
+R -> Sentinel-2 B04
+G -> Sentinel-2 B03
+B -> Sentinel-2 B02
+```
+
+OpenMMLab 的 `LoadImageFromFile` 默认通过 cv2/mmcv 读图，常见输出是 BGR
+顺序，所以 Potsdam 和 DIOR config 里写的是：
+
+```python
+dict(
+    type="RGBToOlmoEarthS2",
+    num_timesteps=1,
+    rgb_channel_order="BGR",
+    input_value_range="0_255",
+)
+```
+
+如果你的 pipeline 已经把图像转成 RGB，就要改成：
+
+```python
+rgb_channel_order="RGB"
+```
+
+#### 数值怎么处理
+
+`RGBToOlmoEarthS2` 先把输入转到近似 Sentinel-2 反射率尺度：
+
+```text
+0-255 RGB -> value * (10000 / 255)
+0-1 RGB   -> value * 10000
+s2        -> 不缩放，认为已经是 S2 尺度
+```
+
+然后只对 B04/B03/B02 三个槽位应用 OLMoEarth 的 Sentinel-2 computed
+normalization：
+
+```text
+normalized = (value - (mean - 2 * std)) / ((mean + 2 * std) - (mean - 2 * std))
+```
+
+这和真实 Sentinel-2 输入使用的是同一套 OLMoEarth computed stats。区别是：
+真实 S2 的 12 个 band 都有观测值；RGB adapter 只有 3 个 band 有观测值。
+
+#### 缺失 band 怎么表达
+
+adapter 会创建完整的 12-band Sentinel-2 L2A 通道布局：
+
+```text
+输出通道数 = 12 * num_timesteps
+```
+
+其中：
+
+- B04/B03/B02 写入由 RGB 映射来的归一化值。
+- 其他 Sentinel-2 band 填 0。
+- `present_bands = ["B04", "B03", "B02"]`。
+
+后面 `OlmoEarthBackbone` 会根据 `present_bands` 构造 bandset mask。也就是说，
+缺失 band 不只是数值填 0，更重要的是 mask 会告诉 OLMoEarth：这些 band 没有
+真实观测，不应该当成完整 Sentinel-2 样本。
+
+#### RGB 适配前后对比
+
+| 项目 | RGB 原图 | adapter 后 |
+| --- | --- | --- |
+| shape | `H x W x 3` | `H x W x 12*T` |
+| 通道顺序 | RGB 或 BGR | OLMoEarth Sentinel-2 band order |
+| 数值范围 | 0-255 或 0-1 | 先近似到 0-10000，再按 S2 stats 归一化 |
+| 缺失 band | 无法表达 | 通过 `present_bands` 和 mask 表达 |
+| 任务定位 | 常规 RGB 遥感 | OLMoEarth out-of-domain 兼容实验 |
+
+#### 为什么不把 RGB 转成 tif manifest
+
+Potsdam/DIOR/DOTA 本身就是 OpenMMLab 能直接读取的图片数据集。对它们来说，最干净
+的做法是保留原生 Dataset：
+
+```text
+Potsdam: MMSeg PotsdamDataset / OlmoEarthPotsdamDataset
+DIOR:    MMDet XMLDataset 或 MMRotate DIORDataset
+DOTA:    MMRotate DOTADataset
+```
+
+然后只在 pipeline 里加 `RGBToOlmoEarthS2`。这样类别映射、split、metric、
+可视化都继续按 OpenMMLab 原生态走，只有进入 backbone 前的通道适配是
+OLMoEarth 特有的。
+
+如果强行把 RGB 也预转换成 manifest，会多出一份数据副本，但没有新增真实
+遥感信息，反而让常规数据集调试更绕。
+
+#### RGB 适配的局限
+
+这一路径不能声称复现 OLMoEarth 论文中的 Sentinel-2 多光谱性能。原因很直接：
+
+- 没有 NIR、red edge、SWIR 等 band。
+- 没有真实多时相观测，通常 `num_timesteps=1`。
+- 数值尺度只是近似映射到 S2 反射率范围。
+- OLMoEarth 的预训练分布是多模态遥感，不是普通 RGB PNG/JPG。
+
+因此文档和 config 里都把它称为 RGB compatibility path。它适合做 Potsdam/DIOR
+这类工程实验，不适合作为论文精度对齐的主路径。
+
+## 4. 数据迁移
+
+数据语义先对齐，后面的模型和指标才有意义。
+
+### 数据集迁移：到底在迁什么
 
 OpenMMLab 的 Dataset 并不是“读一个文件就完了”。它要和 sampler、pipeline、
 data preprocessor、metric、visualizer、resume/debug 工具一起工作。因此数据集
 迁移的目标不是复刻原项目的 Python Dataset，而是把原项目的任务语义变成
 OpenMMLab 能稳定消费的标准样本字典。
 
-### 迁移前：原项目里数据通常长什么样
+#### 迁移前：原项目里数据通常长什么样
 
 OLMoEarth/rslearn 侧的数据不是一个统一的图片目录。常见来源有三类：
 
@@ -293,7 +547,7 @@ OLMoEarth/rslearn 侧的数据不是一个统一的图片目录。常见来源�
 timestamp、present bands、valid mask、ignore label、rslearn metadata。强行塞进
 COCO/VOC 字段会导致“能训练但语义不透明”。
 
-### 迁移后：manifest 是中间协议
+#### 迁移后：manifest 是中间协议
 
 本项目用 manifest 做中间协议。它不是新的深度学习框架，只是一个可审计的样本
 清单：大数组放 GeoTIFF，JSON 只放路径和元数据。
@@ -352,7 +606,7 @@ COCO/VOC 字段会导致“能训练但语义不透明”。
 - 分割和检测共享同一套“路径 + 元数据”思想，但不强行使用同一种标注格式。
 - 原论文任务保留 valid mask/timestamp/band order，常规数据集仍可使用原生格式。
 
-### 为什么有些数据集转 manifest，有些不转
+#### 为什么有些数据集转 manifest，有些不转
 
 这里的判断标准不是“统一”，而是“哪个格式最少损失语义”。
 
@@ -370,7 +624,7 @@ COCO/VOC 字段会导致“能训练但语义不透明”。
 换句话说：原始格式已经是 OpenMMLab 擅长的，就不要为了 OLMoEarth 强行转换；
 原始格式依赖 rslearn/OLMoEarth 内部 task 语义的，就先转换成 manifest。
 
-### 数据流转总图
+#### 数据流转总图
 
 完整的数据迁移可以拆成六层。每层都应该能单独检查，不要等训练报错时才回头
 猜是哪一层坏了。
@@ -409,7 +663,7 @@ Layer 5: model forward
 | model | `check_forward.py` 或 1 iter train | channel、T、band order 不匹配 |
 | metric | 跑一次 val/test | ignore_index、valid mask、类别数不一致 |
 
-### 三种格式不要混淆
+#### 三种格式不要混淆
 
 迁移时最容易混淆的是 manifest sample、OpenMMLab `data_info/results` 和
 `DataSample`。它们不是同一个东西。
@@ -426,7 +680,7 @@ Layer 5: model forward
 OlmoEarth 的 timestamps、present_bands 必须从 manifest 一路保留到 metainfo，
 否则 backbone 只能使用默认时间和默认全 band，精度语义就变了。
 
-### 数据集迁移时必须保留的字段
+#### 数据集迁移时必须保留的字段
 
 不同任务字段不完全一样，但下面这些字段最好在转换时显式写出来。
 
@@ -457,7 +711,7 @@ OlmoEarth 的 timestamps、present_bands 必须从 manifest 一路保留到 meta
 | `present_bands` | RGB/缺 band 必需 | 构造 missing mask |
 | `rslearn` | 可选但推荐 | 保留 source_index/window 等调试信息 |
 
-### 迁移后为什么更好调试
+#### 迁移后为什么更好调试
 
 使用 manifest 后，很多问题可以在训练前发现。
 
@@ -469,186 +723,13 @@ OlmoEarth 的 timestamps、present_bands 必须从 manifest 一路保留到 meta
 | 时间、band、valid 语义不透明 | 关键字段显式保存在 sample 里 |
 | 换服务器/环境时 rslearn 依赖重 | 训练阶段只依赖 GeoTIFF + OpenMMLab |
 
-## 模型迁移：OpenMMLab 通常要迁哪些东西
+## 5. 模型与 Forward 迁移
 
-迁移一个 backbone 到 OpenMMLab，通常不是只写 `Backbone.forward`。完整链路至少
-包含下面几类组件。
+把 OpenMMLab 的 tensor/DataSample 变成 OlmoEarth 需要的 masked sample，再接回 head。
 
-| 组件 | MMSeg 位置 | MMDet 位置 | MMRotate 位置 | 为什么需要 |
-| --- | --- | --- | --- | --- |
-| Dataset | `DATASETS` | `DATASETS` | `DATASETS` | 把 manifest/原生数据变成样本字典 |
-| Transform | `TRANSFORMS` | `TRANSFORMS` | `TRANSFORMS` | 读 GeoTIFF、归一化、RGB adapter、crop/pad |
-| Pack transform | `PackOlmoEarthSegInputs` | `PackDetInputs` | `PackDetInputs` | 把元数据放进 DataSample |
-| Data preprocessor | `OlmoEarthSegDataPreProcessor` | `DetDataPreProcessor` | `DetDataPreProcessor` | pad batch、对齐 valid mask 或 box tensor |
-| Backbone | `MODELS` | `MODELS` | `MODELS` | 构造 OLMoEarth sample 并调用 encoder |
-| Segmentor/Detector wrapper | `OlmoEarthEncoderDecoder` | `OlmoEarthFasterRCNN` | `OlmoEarthFasterRCNN` | 把 DataSample metainfo 传给 backbone |
-| Neck | `MultiLevelNeck` | `OlmoEarthMultiLevelNeck` | `OlmoEarthMultiLevelNeck` | 单尺度 dense map 转多尺度 |
-| Head | linear/UPerHead | RPN/RoIHead | OrientedRPN/RotatedRoIHead | 接具体下游任务 |
-| Metric | IoU/Accuracy | F1/VOCMetric | DOTAMetric | 对齐论文或数据集指标 |
-| Hook/Tool | visualization/checker | checker | 原生 DOTA/DIOR 检查 + smoke train | 多波段可视化和数据预检 |
+### 推理和训练的 forward 逻辑
 
-### 哪些 import 原项目，哪些自己写
-
-折中原则是：**数学定义和权重结构 import 原项目；框架生命周期自己写。**
-
-直接 import 原项目的部分：
-
-- `olmoearth_pretrain.config.Config`：保证模型结构和 released `config.json` 对齐。
-- `patch_legacy_encoder_config`：兼容官方 config。
-- `MaskedOlmoEarthSample` / `MaskValue`：保证 sample 和 mask 语义不变。
-- `PoolingType` / `pool_unmasked_tokens`：保证 token pooling 逻辑不重写。
-- OLMoEarth computed normalization 参数：保证输入尺度对齐预训练。
-
-自己写 OpenMMLab 适配的部分：
-
-- Dataset / manifest loader：OpenMMLab 需要自己的 `load_data_list/filter_data`。
-- Transform：OpenMMLab pipeline 负责 image/label 同步增强和元数据传递。
-- Backbone wrapper：把 `B,C*T,H,W` 还原成 OLMoEarth 的 `B,H,W,T,C`。
-- Segmentor/Detector wrapper：OpenMMLab 默认不会把 timestamps 传给 backbone。
-- Neck/head config：让 dense map 接 UPerNet/Faster R-CNN。
-- Metric/checker：保留 valid mask、rslearn F1 这类非标准语义。
-
-不建议 import 的部分：
-
-- rslearn `ModelDataset` 作为训练 Dataset。
-- OLMoEarth 原生 FSDP/DDP 封装。
-- 原项目训练 loop、optimizer 封装、环境变量读取。
-
-原因是这些东西属于训练框架生命周期。OpenMMLab 已经有 runner、sampler、
-hook、DDP、AMP、checkpoint 语义；硬搬会让两个框架互相抢控制权。
-
-## RGB 输入如何适配 OlmoEarth
-
-RGB 是本项目里最需要强调边界的适配。它的目的不是把 RGB 数据“变成真实
-Sentinel-2”，而是让 Potsdam、DIOR 这类普通 RGB 遥感数据能走同一个
-OlmoEarth backbone 接口。
-
-### 为什么需要 adapter
-
-OlmoEarth 的 Sentinel-2 L2A 分支期望的是 12 个 band：
-
-```text
-B02, B03, B04, B08, B05, B06, B07, B8A, B11, B12, B01, B09
-```
-
-普通 RGB 图像只有 3 个通道，没有近红外、红边、SWIR，也没有真实的 Sentinel-2
-辐射尺度。如果直接把 RGB 当成前三个 S2 band 输入，会同时错两个东西：
-
-- band 语义错：RGB 的 R/G/B 不等于 OLMoEarth band order 的前三个 B02/B03/B04。
-- 数值尺度错：PNG/JPG 通常是 0-255，OLMoEarth S2 归一化按 0-10000 反射率尺度。
-
-所以我们显式写了 `RGBToOlmoEarthS2`，让这种适配在 config 里可见，而不是
-悄悄藏在 Dataset 里。
-
-### 映射规则
-
-映射关系固定为：
-
-```text
-R -> Sentinel-2 B04
-G -> Sentinel-2 B03
-B -> Sentinel-2 B02
-```
-
-OpenMMLab 的 `LoadImageFromFile` 默认通过 cv2/mmcv 读图，常见输出是 BGR
-顺序，所以 Potsdam 和 DIOR config 里写的是：
-
-```python
-dict(
-    type="RGBToOlmoEarthS2",
-    num_timesteps=1,
-    rgb_channel_order="BGR",
-    input_value_range="0_255",
-)
-```
-
-如果你的 pipeline 已经把图像转成 RGB，就要改成：
-
-```python
-rgb_channel_order="RGB"
-```
-
-### 数值怎么处理
-
-`RGBToOlmoEarthS2` 先把输入转到近似 Sentinel-2 反射率尺度：
-
-```text
-0-255 RGB -> value * (10000 / 255)
-0-1 RGB   -> value * 10000
-s2        -> 不缩放，认为已经是 S2 尺度
-```
-
-然后只对 B04/B03/B02 三个槽位应用 OLMoEarth 的 Sentinel-2 computed
-normalization：
-
-```text
-normalized = (value - (mean - 2 * std)) / ((mean + 2 * std) - (mean - 2 * std))
-```
-
-这和真实 Sentinel-2 输入使用的是同一套 OLMoEarth computed stats。区别是：
-真实 S2 的 12 个 band 都有观测值；RGB adapter 只有 3 个 band 有观测值。
-
-### 缺失 band 怎么表达
-
-adapter 会创建完整的 12-band Sentinel-2 L2A 通道布局：
-
-```text
-输出通道数 = 12 * num_timesteps
-```
-
-其中：
-
-- B04/B03/B02 写入由 RGB 映射来的归一化值。
-- 其他 Sentinel-2 band 填 0。
-- `present_bands = ["B04", "B03", "B02"]`。
-
-后面 `OlmoEarthBackbone` 会根据 `present_bands` 构造 bandset mask。也就是说，
-缺失 band 不只是数值填 0，更重要的是 mask 会告诉 OLMoEarth：这些 band 没有
-真实观测，不应该当成完整 Sentinel-2 样本。
-
-### RGB 适配前后对比
-
-| 项目 | RGB 原图 | adapter 后 |
-| --- | --- | --- |
-| shape | `H x W x 3` | `H x W x 12*T` |
-| 通道顺序 | RGB 或 BGR | OLMoEarth Sentinel-2 band order |
-| 数值范围 | 0-255 或 0-1 | 先近似到 0-10000，再按 S2 stats 归一化 |
-| 缺失 band | 无法表达 | 通过 `present_bands` 和 mask 表达 |
-| 任务定位 | 常规 RGB 遥感 | OLMoEarth out-of-domain 兼容实验 |
-
-### 为什么不把 RGB 转成 tif manifest
-
-Potsdam/DIOR/DOTA 本身就是 OpenMMLab 能直接读取的图片数据集。对它们来说，最干净
-的做法是保留原生 Dataset：
-
-```text
-Potsdam: MMSeg PotsdamDataset / OlmoEarthPotsdamDataset
-DIOR:    MMDet XMLDataset 或 MMRotate DIORDataset
-DOTA:    MMRotate DOTADataset
-```
-
-然后只在 pipeline 里加 `RGBToOlmoEarthS2`。这样类别映射、split、metric、
-可视化都继续按 OpenMMLab 原生态走，只有进入 backbone 前的通道适配是
-OLMoEarth 特有的。
-
-如果强行把 RGB 也预转换成 manifest，会多出一份数据副本，但没有新增真实
-遥感信息，反而让常规数据集调试更绕。
-
-### RGB 适配的局限
-
-这一路径不能声称复现 OLMoEarth 论文中的 Sentinel-2 多光谱性能。原因很直接：
-
-- 没有 NIR、red edge、SWIR 等 band。
-- 没有真实多时相观测，通常 `num_timesteps=1`。
-- 数值尺度只是近似映射到 S2 反射率范围。
-- OLMoEarth 的预训练分布是多模态遥感，不是普通 RGB PNG/JPG。
-
-因此文档和 config 里都把它称为 RGB compatibility path。它适合做 Potsdam/DIOR
-这类工程实验，不适合作为论文精度对齐的主路径。
-
-## 推理和训练的 forward 逻辑
-
-### MMSeg online forward
+#### MMSeg online forward
 
 MMSeg online 路径可以按这个顺序理解：
 
@@ -684,7 +765,7 @@ manifest sample
 tensor 传给 backbone，不知道 timestamps 和 present bands。我们加 wrapper 的
 目的就是把 `SegDataSample.metainfo` 临时塞给 backbone。
 
-### MMSeg offline embedding forward
+#### MMSeg offline embedding forward
 
 offline probe 则把 encoder forward 前移到抽特征阶段：
 
@@ -707,7 +788,7 @@ embedding.tif -> OlmoEarthFeatureBackbone -> patch-linear head
 不是通用的 MMSeg 数据读取范式。只要改了 checkpoint、`patch_size`、输入 pipeline、
 crop size、normalization 或 split，都应该重新抽 embedding。
 
-### MMDet forward
+#### MMDet forward
 
 MMDet 检测路径类似，但后面接的是 detector：
 
@@ -734,7 +815,7 @@ detection manifest / XMLDataset
 不像 ResNet 那样天然输出 C2/C3/C4/C5，所以需要把单个 dense map 派生成多个尺度。
 这不是让 OlmoEarth 真的变成 FPN backbone，而是满足 RPN/RoIHead 的接口假设。
 
-### MMRotate forward
+#### MMRotate forward
 
 MMRotate 的路径和 MMDet 相似，但 box 语义完全不同：
 
@@ -762,7 +843,7 @@ DOTA / DIOR-R
 DOTA/DIOR-R 的标注和评估都是旋转框。迁移到 MMRotate 的核心价值，就是复用
 `qbox -> rbox`、rotated IoU、rotated NMS 和 DOTA metric。
 
-### Shape trace：MMSeg 多时相 Sentinel-2
+#### Shape trace：MMSeg 多时相 Sentinel-2
 
 假设一个 PASTIS 样本有 `T=12` 个时相，每个时相是 `C=12` 个 Sentinel-2 band，
 crop 后大小为 `H=W=128`，batch size 为 `B=4`。
@@ -781,7 +862,7 @@ crop 后大小为 `H=W=128`，batch size 为 `B=4`。
 如果这里任何一行对不上，先不要怀疑模型，先检查 manifest 的 `img_paths` 数量、
 config 的 `num_timesteps`、band order 和 pipeline 顺序。
 
-### Shape trace：MMDet DIOR RGB
+#### Shape trace：MMDet DIOR RGB
 
 假设 DIOR 图片 resize 后近似 `800 x 800`，batch size 为 `B=4`，`patch_size=8`。
 
@@ -799,7 +880,7 @@ config 的 `num_timesteps`、band order 和 pipeline 顺序。
 DIOR 这条路径没有真实 NIR/SWIR/red-edge band。shape 看起来像 Sentinel-2，
 但语义上是 RGB compatibility。
 
-### Shape trace：MMRotate DOTA / DIOR-R RGB
+#### Shape trace：MMRotate DOTA / DIOR-R RGB
 
 假设输入图片 resize 后为 `1024 x 1024`，`patch_size=8`。
 
@@ -817,12 +898,16 @@ DIOR 这条路径没有真实 NIR/SWIR/red-edge band。shape 看起来像 Sentin
 如果你的 annotation 是水平框 XML，就不应该走这条路径；用 MMDet 的 DIOR
 配置即可。只有标注本身是旋转框，MMRotate 才是合理选择。
 
-## 最小跑通命令
+## 6. 复现实验 Recipes
+
+这一部分从“怎么迁”落到“怎么跑、怎么确认结果语义”。
+
+### 最小跑通命令
 
 学习迁移时不要直接开长训练。建议按“config -> dataset -> forward -> train”的顺序
 逐步加复杂度。
 
-### DIOR / MMDet RGB 路线
+#### DIOR / MMDet RGB 路线
 
 先确认 config 能解析：
 
@@ -847,7 +932,7 @@ python tools/test.py \
   work_dirs/olmoearth-base_faster-rcnn_dior-rgb/latest.pth
 ```
 
-### rslearn detection / MMDet manifest 路线
+#### rslearn detection / MMDet manifest 路线
 
 先转换：
 
@@ -876,7 +961,7 @@ python tools/train.py \
   projects/olmoearth/configs/olmoearth-base_faster-rcnn_1x_rslearn-detection-s2.py
 ```
 
-### DOTA / DIOR-R / MMRotate RGB 路线
+#### DOTA / DIOR-R / MMRotate RGB 路线
 
 先看数据目录属于哪一种：
 
@@ -929,7 +1014,7 @@ python tools/train.py \
   --cfg-options train_cfg.max_epochs=1 default_hooks.logger.interval=1
 ```
 
-### MMSeg manifest 路线
+#### MMSeg manifest 路线
 
 以 PASTIS 为例：
 
@@ -955,9 +1040,9 @@ python projects/olmoearth/tools/check_forward.py \
 `check_pipeline.py` 用来确认数据增强和 pack 后的 tensor 对齐；`check_forward.py`
 用来确认模型能计算一次 loss。它们比完整训练便宜得多。
 
-## 迁移到 MMSegmentation
+### 迁移到 MMSegmentation
 
-### 数据集准备
+#### 数据集准备
 
 分割 manifest 的核心结构：
 
@@ -1000,7 +1085,7 @@ python projects/olmoearth/tools/check_forward.py \
 为什么不用 `.npz`：GeoTIFF 更容易用 GIS / raster 工具查看，也能保留多波段
 描述；manifest 只记录路径和元数据，不把大数组塞进 JSON。
 
-### Backbone 封装与注册
+#### Backbone 封装与注册
 
 MMSeg 的模型看到的是 `B x C*T x H x W`。`OlmoEarthBackbone` 在内部还原成：
 
@@ -1019,7 +1104,7 @@ OlmoEarth encoder 需要的 mask。
 - RGB 数据通过 `RGBToOlmoEarthS2` 映射到 B04/B03/B02，缺失的 S2 band 用
   missing mask 表达。
 
-### Feature map 适配与 decode head
+#### Feature map 适配与 decode head
 
 OlmoEarth 输出的是一个 dense feature map，空间尺度取决于 `patch_size`：
 
@@ -1042,7 +1127,7 @@ OlmoEarth 输出的是一个 dense feature map，空间尺度取决于 `patch_si
 | 做 OpenMMLab 工程实验 | online backbone + UPerNet | 更像常规语义分割模型 |
 | 高分辨率 RGB | patch_size=16 可省显存 | 但空间细节可能下降 |
 
-### 训练流程
+#### 训练流程
 
 以 PASTIS 为例：
 
@@ -1075,9 +1160,9 @@ offline probe 慢变快的原因很简单：原来每个 epoch 都前向 OLMoEar
 标准训练；它绕过 runner，只做一次离线特征物化。第二步训练 offline-linear config
 时，才是标准 MMSeg 训练流程。
 
-## 迁移到 MMDetection
+### 迁移到 MMDetection
 
-### 数据集准备
+#### 数据集准备
 
 rslearn detection 不再转 COCO，而是转 OLMoEarth detection manifest：
 
@@ -1135,7 +1220,7 @@ python projects/olmoearth/tools/check_converted_det_dataset.py \
   --ann-file train.json
 ```
 
-### Backbone 接入与 neck/head 适配
+#### Backbone 接入与 neck/head 适配
 
 MMDet 的 Faster R-CNN 需要多尺度 feature。OlmoEarth 只输出一个 dense map，
 所以本项目用 `OlmoEarthMultiLevelNeck` 派生多个尺度：
@@ -1159,7 +1244,7 @@ scale:  1.0,        0.5,          0.25,         0.125
 - NMS：RPN 0.7，RCNN 0.5。
 - max detections：100。
 
-### DIOR 常规数据集示例
+#### DIOR 常规数据集示例
 
 DIOR 不需要转 manifest。它是常规 VOC/XML 风格数据集，用 MMDet 原生
 `XMLDataset` 更合理：
@@ -1191,9 +1276,9 @@ dict(
 
 这样普通 RGB 图像会映射到 Sentinel-2 的 B04/B03/B02 槽位，其余 band 缺失。
 
-## 迁移到 MMRotate
+### 迁移到 MMRotate
 
-### 数据集准备
+#### 数据集准备
 
 MMRotate 只负责旋转框。先判断标注格式：
 
@@ -1206,7 +1291,7 @@ MMRotate 只负责旋转框。先判断标注格式：
 不要把水平框 DIOR XML 硬塞进 MMRotate。水平框 DIOR 更适合 MMDetection；
 DIOR-R 或 DOTA-like DIOR 才适合 MMRotate。
 
-### Box flow
+#### Box flow
 
 MMRotate pipeline 中 box 会经历：
 
@@ -1222,7 +1307,7 @@ MMRotate pipeline 中 box 会经历：
 OLMoEarth 只替换 backbone 输入和 feature 输出，不改这条 rotated box 语义链。
 这也是迁移到 MMRotate 的关键：box、NMS、metric 继续使用框架原生实现。
 
-### Backbone 和 neck
+#### Backbone 和 neck
 
 MMRotate 的 Oriented R-CNN 默认需要多尺度特征。本项目使用：
 
@@ -1239,9 +1324,9 @@ scale:  1.0,        0.5, 0.25, 0.125, 0.0625
 
 这是一种接口适配，不表示 OLMoEarth encoder 本身天然输出 FPN。
 
-## 评估与可视化
+### 评估与可视化
 
-### 分割
+#### 分割
 
 分割使用 `OlmoEarthIoUMetric`：
 
@@ -1253,7 +1338,7 @@ scale:  1.0,        0.5, 0.25, 0.125, 0.0625
 文件路径，但 OLMoEarth 输入可能是多时相多波段张量。因此项目里提供
 `OlmoEarthVisualizationHook`，直接从 batch tensor 生成可视化，避免读取错文件。
 
-### 检测
+#### 检测
 
 rslearn manifest 检测使用 `OlmoEarthDetMetric`：
 
@@ -1265,9 +1350,13 @@ rslearn manifest 检测使用 `OlmoEarthDetMetric`：
 原始 DIOR 水平框这类常规 MMDetection 数据集继续用 `VOCMetric` 或数据集标准
 metric。DOTA、DIOR-R 这类旋转框数据则交给 MMRotate 的 `DOTAMetric`。
 
-## 常见问题与调试
+## 7. Debug 与常见问题
 
-### 权重加载失败
+把常见报错按原因和排查入口集中起来。
+
+### 常见问题与调试
+
+#### 权重加载失败
 
 检查三件事：
 
@@ -1275,7 +1364,7 @@ metric。DOTA、DIOR-R 这类旋转框数据则交给 MMRotate 的 `DOTAMetric`�
 2. `model.backbone.init_cfg.checkpoint` 指向 released `weights.pth`。
 3. 顶层 `load_from` 没有误填 OLMoEarth backbone 权重。
 
-### 输入通道不匹配
+#### 输入通道不匹配
 
 报错类似：
 
@@ -1286,13 +1375,13 @@ Expected 144 channels (12 bands x 12 timesteps), got 36
 说明 config 的 `num_timesteps` 和 manifest 里的 `img_paths` 数量不一致，
 或者 band order 不一致。
 
-### `fast_pass=True` 报错或精度异常
+#### `fast_pass=True` 报错或精度异常
 
 不要固定 `fast_pass=True`。RGB adapter、缺失 band、多模态缺失 token 都应该
 让 backbone 自动判断。固定 True 会跳过缺失 token 处理，可能直接错，也可能
 悄悄改变语义。
 
-### PyTorch 2.3 bool sort 报错
+#### PyTorch 2.3 bool sort 报错
 
 报错类似：
 
@@ -1303,7 +1392,7 @@ Sort currently does not support bool dtype on CUDA.
 本项目的 backbone 已把 bool mask 临时转成 `uint8` 再 sort，这是为了兼容
 OlmoEarth 原始代码在较旧 PyTorch CUDA 上的问题。
 
-### 大图慢或显存高
+#### 大图慢或显存高
 
 分割 offline embedding extractor 已支持滑窗：
 
@@ -1316,7 +1405,7 @@ python projects/olmoearth/tools/extract_embeddings.py \
 检测和在线分割训练仍建议用 OpenMMLab 的 crop / resize / batch size / AMP
 控制显存。
 
-### position embedding
+#### position embedding
 
 OlmoEarth 的 dense encoder 通过 `patch_size` 控制输出 stride。不要把普通 ViT
 “固定 16x16 patch”的直觉直接套过来。对于高分辨率任务：
@@ -1324,7 +1413,7 @@ OlmoEarth 的 dense encoder 通过 `patch_size` 控制输出 stride。不要把�
 - `patch_size=4`：细节好，显存高。
 - `patch_size=16`：显存低，输出更粗。
 
-### 报错索引
+#### 报错索引
 
 | 报错或现象 | 大概率原因 | 先检查哪里 | 处理方式 |
 | --- | --- | --- | --- |
@@ -1350,9 +1439,13 @@ OlmoEarth 的 dense encoder 通过 `patch_size` 控制输出 stride。不要把�
   -> metric 是否对齐 ignore/valid
 ```
 
-## 进阶方向
+## 8. 进阶方向
 
-### 多波段与多模态
+当复现闭环稳定后，再考虑更复杂的扩展。
+
+### 进阶方向
+
+#### 多波段与多模态
 
 manifest 的好处是可以自然扩展：
 
@@ -1367,7 +1460,7 @@ manifest 的好处是可以自然扩展：
 - `MaskedOlmoEarthSample` 字段名。
 - mask 的 bandset 语义。
 
-### 参数高效微调
+#### 参数高效微调
 
 现在的复现路径主要是冻结 backbone + probe，或全量训练。后续可以加：
 
@@ -1377,7 +1470,7 @@ manifest 的好处是可以自然扩展：
 
 建议仍然放在 `projects/olmoearth`，不要改 OpenMMLab 主干。
 
-### 小样本与滑窗预测
+#### 小样本与滑窗预测
 
 遥感常见问题是数据少、图大、类别稀疏。实用方向：
 
@@ -1386,7 +1479,11 @@ manifest 的好处是可以自然扩展：
 - 按 class frequency 调 loss 或 sampler。
 - 对 valid mask 做严格检查，避免无效区域污染指标。
 
-## 最重要的迁移经验
+## 9. 经验总结与 Checklist
+
+最后用经验和清单帮助读者迁移下一个模型或数据集。
+
+### 最重要的迁移经验
 
 1. 先对齐数据语义，再对齐模型接口。
    只要 label、mask、timestamp、band order 错了，模型接得再优雅也没意义。
@@ -1405,68 +1502,11 @@ manifest 的好处是可以自然扩展：
 5. 能先检查数据，就不要先跑训练。
    先跑 manifest checker、pipeline checker、forward checker，再开长训练。
 
-## 通用迁移模板
-
-如果把 OlmoEarth 换成另一个非 OpenMMLab 模型，也可以按同样顺序迁移。
-
-### Step 1：拆原项目
-
-先不要急着写 OpenMMLab config，先回答：
-
-| 问题 | 为什么重要 |
-| --- | --- |
-| 原项目 Dataset 最终返回什么字段 | 决定是否转 manifest、写 Dataset、还是用原生 Dataset |
-| 模型 `forward` 真实需要哪些输入 | 决定 backbone wrapper 要从 DataSample metainfo 里拿什么 |
-| 权重文件是什么结构 | 决定用 `init_cfg`、自定义 `init_weights`，还是顶层 `load_from` |
-| 训练时哪些模块冻结 | 决定 optimizer paramwise、`requires_grad` 和复现设置 |
-| metric 如何计算 | 决定用 OpenMMLab 原生 metric 还是自定义 metric |
-
-### Step 2：定 OpenMMLab 边界
-
-迁移时尽量让 OpenMMLab 管 OpenMMLab 擅长的部分：
-
-| 交给 OpenMMLab | 从原项目保留 |
-| --- | --- |
-| runner、optimizer、hook、DDP、AMP、checkpoint | 模型结构、权重命名、核心数学算子 |
-| Dataset 生命周期、sampler、pipeline、DataSample | 特殊输入语义，如 timestamp、mask、band order |
-| 原生 metric，如 IoU/VOC/DOTA | 原论文特有 valid mask、F1、ignore 规则 |
-
-如果一个逻辑影响论文精度，就不要为了“更像 OpenMMLab”随便改；如果一个逻辑只是
-训练工程控制，就应该尽量交给 OpenMMLab。
-
-### Step 3：先建最小闭环
-
-最小闭环不是完整训练，而是：
-
-```text
-config 可解析
-  -> Dataset 能取一个样本
-  -> pipeline 后 tensor shape 正确
-  -> model 能算一次 loss
-  -> metric 能跑一次 val
-```
-
-只有这个闭环稳定后，再讨论长训练、调参和复现实验。
-
-### Step 4：写清楚复现边界
-
-每个 config 都应该能回答：
-
-| 问题 | 例子 |
-| --- | --- |
-| 是否论文复现 | PASTIS/Crop-Type linear probe 是，Potsdam/DIOR RGB 不是 |
-| 是否冻结 backbone | linear probe 冻结，UPerNet/检测实验可训练 |
-| 输入是否同分布 | Sentinel-2 是，RGB adapter 不是 |
-| metric 是否同原论文 | valid-mask IoU/F1 需要特别说明 |
-| 是否有离线缓存 | embedding 有，online 训练没有 |
-
-这样其他人学习迁移时，看到一个结果就知道它代表什么，也知道不能和哪些结果直接比较。
-
-## 迁移 Checklist
+### 迁移 Checklist
 
 真正迁移一个新数据集时，可以按下面的清单逐项打勾。
 
-### 数据 Checklist
+#### 数据 Checklist
 
 - 原始数据的 split 是否明确，train/val/test 是否为空。
 - 图像是 RGB、单时相多波段，还是多时相多波段。
@@ -1479,7 +1519,7 @@ config 可解析
 - class names 是否和 config 的 `num_classes` 对齐。
 - manifest 路径是否都相对 `data_root`，或使用绝对路径。
 
-### Pipeline Checklist
+#### Pipeline Checklist
 
 - image、label、valid mask 是否一起 crop/flip/pad。
 - RGB 数据是否显式使用 `RGBToOlmoEarthS2`。
@@ -1487,7 +1527,7 @@ config 可解析
 - `PackOlmoEarthSegInputs` / `PackDetInputs` 是否保留 timestamps 和 present_bands。
 - data preprocessor 的 pad size 是否和 head/backbone stride 兼容。
 
-### 模型 Checklist
+#### 模型 Checklist
 
 - `model.backbone.model_config_path` 是否指向 OLMoEarth `config.json`。
 - `model.backbone.init_cfg.checkpoint` 是否指向 OLMoEarth `weights.pth`。
@@ -1498,7 +1538,7 @@ config 可解析
 - 分割任务是 paper-style linear probe，还是 UPerNet 工程实验。
 - backbone 是否应该冻结，是否和实验目标一致。
 
-### 评估 Checklist
+#### 评估 Checklist
 
 - 分割是否需要 valid mask filtering。
 - 检测是用数据集标准 mAP，还是 rslearn-style F1。
@@ -1506,7 +1546,7 @@ config 可解析
 - 可视化是否能处理多波段输入。
 - 评价前是否先跑过一个小 batch 的 forward。
 
-### 复现实验 Checklist
+#### 复现实验 Checklist
 
 - 是否使用论文对应的数据预处理，而不是为了方便换成 RGB adapter。
 - 是否冻结了论文线性探针中应该冻结的部分。
