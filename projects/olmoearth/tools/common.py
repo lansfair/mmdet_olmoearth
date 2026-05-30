@@ -2,9 +2,51 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Iterator, TypeVar
 
 import numpy as np
+
+T = TypeVar("T")
+
+
+def progress_iter(
+    iterable: Iterable[T],
+    total: int | None = None,
+    desc: str = "processing",
+    enabled: bool = True,
+) -> Iterator[T]:
+    """Yield items with tqdm progress, falling back to periodic prints."""
+    if not enabled:
+        yield from iterable
+        return
+    if total is None:
+        try:
+            total = len(iterable)  # type: ignore[arg-type]
+        except TypeError:
+            total = None
+    try:
+        from tqdm.auto import tqdm
+
+        yield from tqdm(iterable, total=total, desc=desc, dynamic_ncols=True)
+        return
+    except ImportError:
+        pass
+
+    if total is None:
+        print(f"{desc}: started")
+        for idx, item in enumerate(iterable, start=1):
+            if idx == 1 or idx % 100 == 0:
+                print(f"{desc}: processed {idx}")
+            yield item
+        print(f"{desc}: done")
+        return
+
+    print(f"{desc}: 0/{total}")
+    step = max(1, total // 20)
+    for idx, item in enumerate(iterable, start=1):
+        yield item
+        if idx == total or idx % step == 0:
+            print(f"{desc}: {idx}/{total}")
 
 
 def make_json_safe(obj: Any) -> Any:

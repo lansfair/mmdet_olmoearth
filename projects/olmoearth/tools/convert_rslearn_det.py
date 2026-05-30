@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from common import save_json, save_timesteps_as_geotiffs
+from common import progress_iter, save_json, save_timesteps_as_geotiffs
 
 
 S2_BANDS = [
@@ -239,7 +239,12 @@ def _convert_split(
 ) -> dict[str, Any]:
     samples = []
 
-    for idx in range(len(rslearn_dataset)):
+    total = len(rslearn_dataset)
+    for idx in progress_iter(
+        range(total),
+        total=total,
+        desc=f"{manifest_name}: converting rslearn detections",
+    ):
         input_dict, target_dict, metadata = rslearn_dataset[idx]
         raster = input_dict["sentinel2_l2a"]
         image = _to_numpy(raster).astype(np.float32)
