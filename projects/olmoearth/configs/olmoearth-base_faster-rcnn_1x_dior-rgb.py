@@ -3,8 +3,8 @@ custom_imports = dict(
     allow_failed_imports=False,
 )
 
-data_root = "data/DIOR"
-olmoearth_model_dir = "checkpoints/olmoearth"
+data_root = "/mnt/ht2-nas2/EO test/zyf/data/DIOR"
+olmoearth_model_dir = "/mnt/ht2-nas2/EO_test/model/OlmoEarth-v1-Base"
 model_config_path = f"{olmoearth_model_dir}/config.json"
 weights_path = f"{olmoearth_model_dir}/weights.pth"
 work_dir = "./work_dirs/olmoearth-base_faster-rcnn_dior-rgb"
