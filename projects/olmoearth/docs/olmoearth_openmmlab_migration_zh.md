@@ -1,4 +1,4 @@
-# OlmoEarth -> MMSeg / MMDet 迁移教程
+# OlmoEarth -> MMSeg / MMDet / MMRotate 迁移教程
 
 这份文档总结当前项目里 OlmoEarth 迁移到 OpenMMLab 的做法。它不是
 “把代码能跑起来”的流水账，而是解释为什么要做这些适配，以及哪些地方
@@ -9,18 +9,35 @@
 读完以后应该能回答三个问题：
 
 1. OlmoEarth Backbone 的输入、输出和普通 ResNet/ViT 有什么不同。
-2. 如何在 MMSegmentation / MMDetection 里接入 OlmoEarth 做遥感下游任务。
+2. 如何在 MMSegmentation / MMDetection / MMRotate 里接入 OlmoEarth 做遥感下游任务。
 3. 为什么本项目选择 manifest、OpenMMLab Dataset、`init_cfg`、neck/head 适配，
    而不是训练时直接包一层 rslearn。
 
 最终能跑通两条路径：
 
 - 分割：PASTIS、MADOS、Sen1Floods11、AWF、Nandi、Crop-Type、Potsdam。
-- 检测：rslearn detection manifest，以及 DIOR 这类常规 OpenMMLab RGB 数据集。
+- 水平框检测：rslearn detection manifest，以及原始 DIOR 这类常规 OpenMMLab RGB 数据集。
+- 旋转框检测：DOTA、DIOR-R、DOTA-like DIOR，走 MMRotate 原生 rotated 组件。
 
 ## 如何阅读这份教程
 
 这份教程建议按三条路线阅读，不要一开始就把所有任务混在一起。
+
+先用下面这个入口判断该进哪个仓库：
+
+| 任务/标注 | 推荐框架 | 推荐数据入口 | 说明 |
+| --- | --- | --- | --- |
+| 语义分割 mask | MMSegmentation | manifest、GEO-Bench loader 或原生 Potsdam | 需要 decode head、IoU、valid-mask 语义 |
+| 水平框检测 `xmin/ymin/xmax/ymax` | MMDetection | rslearn detection manifest、`XMLDataset` | 适合 Faster R-CNN/VOCMetric/水平 NMS |
+| 旋转框检测 8 点框或 `robndbox` | MMRotate | `DOTADataset`、`DIORDataset` | 需要 qbox/rbox、rotated IoU、rotated NMS |
+
+最容易混淆的是 DIOR：
+
+| 你磁盘上的 DIOR 形态 | 应该用 |
+| --- | --- |
+| `Annotations/*.xml`，里面是 `bndbox/xmin/ymin/xmax/ymax` | MMDetection `XMLDataset` |
+| `Annotations/Oriented Bounding Boxes/*.xml`，里面是 `robndbox` | MMRotate `DIORDataset` |
+| `annfiles/*.txt`，每行 `x1 y1 ... x4 y4 class difficult` | MMRotate `DOTADataset` |
 
 ### 路线 A：先跑通一个 OpenMMLab 实验
 
@@ -61,8 +78,11 @@ AWF / Nandi
 适合要把新数据接到 OlmoEarth 的读者。先回答下面几个问题：
 
 ```text
-你的数据是 RGB 图片 + VOC/COCO/XML 标注？
-  -> 优先用 OpenMMLab 原生 Dataset，只加 RGB adapter。
+你的数据是 RGB 图片 + VOC/COCO/XML 水平框标注？
+  -> 优先用 MMDetection 原生 Dataset，只加 RGB adapter。
+
+你的数据是 RGB 图片 + DOTA txt / DIOR-R oriented XML？
+  -> 优先用 MMRotate 原生 Dataset，只加 RGB adapter。
 
 你的数据是多波段 GeoTIFF + mask/box？
   -> 可以直接写 manifest，或写轻量 Dataset。
@@ -90,7 +110,7 @@ Python 环境之间来回找。
 - Python 3.10 或 3.11。
 - PyTorch。OLMoEarth 原项目偏新，服务器如果是 PyTorch 2.3，需要保留本项目里
   对 CUDA bool sort 的兼容补丁。
-- OpenMMLab：`mmengine`、`mmcv`、`mmsegmentation`、`mmdetection`。
+- OpenMMLab：`mmengine`、`mmcv`、`mmsegmentation`、`mmdetection`、`mmrotate`。
 - `rasterio`：用于读写多波段 GeoTIFF。
 - 本地 `olmoearth_pretrain`：用于构建模型、读取 modality 定义和归一化参数。
 - `rslearn`：只在转换 rslearn 项目数据时需要，训练时不再依赖它。
@@ -152,6 +172,7 @@ Potsdam 这类单图数据可以走单时相适配，但这属于 out-of-domain 
 ```text
 mmsegmentation/projects/olmoearth/
 mmdetection/projects/olmoearth/
+mmrotate/projects/olmoearth/
 ```
 
 并通过：
@@ -185,12 +206,14 @@ GeoTIFF 和 JSON manifest。
 分割里的 PASTIS/AWF/Nandi/MADOS/Sen1Floods11、检测里的 rslearn detection，
 都保留原任务的 label、valid mask、时间戳和多波段输入。
 
-DIOR、Potsdam 这种常规 OpenMMLab 数据集，则尽量走原生 Dataset：
+DIOR、DOTA、Potsdam 这种常规 OpenMMLab 数据集，则尽量走原生 Dataset：
 
-- DIOR：`XMLDataset` + `RGBToOlmoEarthS2`。
+- 原始 DIOR 水平框：MMDetection `XMLDataset` + `RGBToOlmoEarthS2`。
+- DIOR-R / DOTA-like DIOR：MMRotate `DIORDataset` 或 `DOTADataset` + `RGBToOlmoEarthS2`。
+- DOTA：MMRotate `DOTADataset` + `RGBToOlmoEarthS2`。
 - Potsdam：MMSeg Potsdam 数据布局 + RGB adapter。
 
-不要为了“所有数据集统一”而把 DIOR/Potsdam 也强行转成 rslearn 格式。
+不要为了“所有数据集统一”而把 DIOR/DOTA/Potsdam 也强行转成 rslearn 格式。
 
 ### 4. `init_cfg` 加载 OLMoEarth 权重
 
@@ -300,7 +323,9 @@ COCO/VOC 字段会导致“能训练但语义不透明”。
 | rslearn detection | rslearn -> detection manifest | COCO 不能自然表达 `valid/timestamps/img_paths` |
 | Crop-Type | 可直接读 GEO-Bench，也可抽 embedding | 原 loader 能清楚表达 band stats 和 label |
 | Potsdam | 用 MMSeg Potsdam 布局 + RGB adapter | 它本来就是图片分割数据集 |
-| DIOR | 用 MMDet `XMLDataset` + RGB adapter | 它本来就是 VOC/XML 检测数据集 |
+| DIOR 水平框 | 用 MMDet `XMLDataset` + RGB adapter | 它本来就是 VOC/XML 水平框检测数据集 |
+| DIOR-R | 用 MMRotate `DIORDataset` + RGB adapter | 需要 oriented XML、rotated box coder 和 rotated mAP |
+| DOTA / DOTA-like DIOR | 用 MMRotate `DOTADataset` + RGB adapter | 它本来就是 8 点框 txt 格式 |
 
 换句话说：原始格式已经是 OpenMMLab 擅长的，就不要为了 OLMoEarth 强行转换；
 原始格式依赖 rslearn/OLMoEarth 内部 task 语义的，就先转换成 manifest。
@@ -409,18 +434,18 @@ OlmoEarth 的 timestamps、present_bands 必须从 manifest 一路保留到 meta
 迁移一个 backbone 到 OpenMMLab，通常不是只写 `Backbone.forward`。完整链路至少
 包含下面几类组件。
 
-| 组件 | MMSeg 位置 | MMDet 位置 | 为什么需要 |
-| --- | --- | --- | --- |
-| Dataset | `DATASETS` | `DATASETS` | 把 manifest/原生数据变成样本字典 |
-| Transform | `TRANSFORMS` | `TRANSFORMS` | 读 GeoTIFF、归一化、RGB adapter、crop/pad |
-| Pack transform | `PackOlmoEarthSegInputs` | `PackDetInputs` | 把元数据放进 DataSample |
-| Data preprocessor | `OlmoEarthSegDataPreProcessor` | `DetDataPreProcessor` | pad batch、对齐 valid mask |
-| Backbone | `MODELS` | `MODELS` | 构造 OLMoEarth sample 并调用 encoder |
-| Segmentor/Detector wrapper | `OlmoEarthEncoderDecoder` | `OlmoEarthFasterRCNN` | 把 DataSample metainfo 传给 backbone |
-| Neck | `MultiLevelNeck` | `OlmoEarthMultiLevelNeck` | 单尺度 dense map 转多尺度 |
-| Head | linear/UPerHead | RPN/RoIHead | 接具体下游任务 |
-| Metric | IoU/Accuracy | F1/VOCMetric | 对齐论文或数据集指标 |
-| Hook/Tool | visualization/checker | checker | 多波段可视化和数据预检 |
+| 组件 | MMSeg 位置 | MMDet 位置 | MMRotate 位置 | 为什么需要 |
+| --- | --- | --- | --- | --- |
+| Dataset | `DATASETS` | `DATASETS` | `DATASETS` | 把 manifest/原生数据变成样本字典 |
+| Transform | `TRANSFORMS` | `TRANSFORMS` | `TRANSFORMS` | 读 GeoTIFF、归一化、RGB adapter、crop/pad |
+| Pack transform | `PackOlmoEarthSegInputs` | `PackDetInputs` | `PackDetInputs` | 把元数据放进 DataSample |
+| Data preprocessor | `OlmoEarthSegDataPreProcessor` | `DetDataPreProcessor` | `DetDataPreProcessor` | pad batch、对齐 valid mask 或 box tensor |
+| Backbone | `MODELS` | `MODELS` | `MODELS` | 构造 OLMoEarth sample 并调用 encoder |
+| Segmentor/Detector wrapper | `OlmoEarthEncoderDecoder` | `OlmoEarthFasterRCNN` | `OlmoEarthFasterRCNN` | 把 DataSample metainfo 传给 backbone |
+| Neck | `MultiLevelNeck` | `OlmoEarthMultiLevelNeck` | `OlmoEarthMultiLevelNeck` | 单尺度 dense map 转多尺度 |
+| Head | linear/UPerHead | RPN/RoIHead | OrientedRPN/RotatedRoIHead | 接具体下游任务 |
+| Metric | IoU/Accuracy | F1/VOCMetric | DOTAMetric | 对齐论文或数据集指标 |
+| Hook/Tool | visualization/checker | checker | 原生 DOTA/DIOR 检查 + smoke train | 多波段可视化和数据预检 |
 
 ### 哪些 import 原项目，哪些自己写
 
@@ -553,12 +578,13 @@ adapter 会创建完整的 12-band Sentinel-2 L2A 通道布局：
 
 ### 为什么不把 RGB 转成 tif manifest
 
-Potsdam/DIOR 本身就是 OpenMMLab 能直接读取的图片数据集。对它们来说，最干净
+Potsdam/DIOR/DOTA 本身就是 OpenMMLab 能直接读取的图片数据集。对它们来说，最干净
 的做法是保留原生 Dataset：
 
 ```text
 Potsdam: MMSeg PotsdamDataset / OlmoEarthPotsdamDataset
-DIOR:    MMDet XMLDataset
+DIOR:    MMDet XMLDataset 或 MMRotate DIORDataset
+DOTA:    MMRotate DOTADataset
 ```
 
 然后只在 pipeline 里加 `RGBToOlmoEarthS2`。这样类别映射、split、metric、
@@ -657,6 +683,34 @@ detection manifest / XMLDataset
 不像 ResNet 那样天然输出 C2/C3/C4/C5，所以需要把单个 dense map 派生成多个尺度。
 这不是让 OlmoEarth 真的变成 FPN backbone，而是满足 RPN/RoIHead 的接口假设。
 
+### MMRotate forward
+
+MMRotate 的路径和 MMDet 相似，但 box 语义完全不同：
+
+```text
+DOTA / DIOR-R
+  -> LoadImageFromFile
+  -> LoadAnnotations(box_type="qbox")
+  -> ConvertBoxType(qbox -> rbox)
+  -> Resize / RandomFlip
+  -> RGBToOlmoEarthS2
+  -> PackDetInputs
+       DetDataSample.metainfo: present_bands/...
+       gt_instances.bboxes: rotated boxes
+  -> OlmoEarthFasterRCNN.loss/predict
+       set_batch_metainfo(data_samples.metainfo)
+  -> OlmoEarthBackbone.forward
+  -> OlmoEarthMultiLevelNeck
+       one map -> strides [p, 2p, 4p, 8p, 16p]
+  -> OrientedRPNHead
+  -> RotatedSingleRoIExtractor + rotated bbox head
+  -> rotated loss / nms_rotated / DOTAMetric
+```
+
+这里不能继续使用普通 MMDet 的水平框 `RPNHead + SingleRoIExtractor`，因为
+DOTA/DIOR-R 的标注和评估都是旋转框。迁移到 MMRotate 的核心价值，就是复用
+`qbox -> rbox`、rotated IoU、rotated NMS 和 DOTA metric。
+
 ### Shape trace：MMSeg 多时相 Sentinel-2
 
 假设一个 PASTIS 样本有 `T=12` 个时相，每个时相是 `C=12` 个 Sentinel-2 band，
@@ -693,6 +747,24 @@ config 的 `num_timesteps`、band order 和 pipeline 顺序。
 
 DIOR 这条路径没有真实 NIR/SWIR/red-edge band。shape 看起来像 Sentinel-2，
 但语义上是 RGB compatibility。
+
+### Shape trace：MMRotate DOTA / DIOR-R RGB
+
+假设输入图片 resize 后为 `1024 x 1024`，`patch_size=8`。
+
+| 步骤 | 数据形态 | 说明 |
+| --- | --- | --- |
+| LoadImageFromFile | `H,W,3` | 原生 RGB/BGR 图片 |
+| LoadAnnotations | qbox，8 点四边形 | DOTA txt 或 DIOR-R XML 解析结果 |
+| ConvertBoxType | rbox，`cx,cy,w,h,angle` | 旋转框检测头消费的 box 类型 |
+| RGBToOlmoEarthS2 | `H,W,12` | 只写 B04/B03/B02，其他 band 缺失 |
+| PackDetInputs | `12,H,W` + rotated gt | metainfo 保留 present_bands |
+| backbone | `B,768,H/8,W/8` | OLMoEarth 单个 dense feature map |
+| MultiLevelNeck | 5 个尺度 | stride 为 `8,16,32,64,128` |
+| Oriented R-CNN | rotated proposals / rboxes | 用 rotated IoU、rotated NMS、DOTAMetric |
+
+如果你的 annotation 是水平框 XML，就不应该走这条路径；用 MMDet 的 DIOR
+配置即可。只有标注本身是旋转框，MMRotate 才是合理选择。
 
 ## 最小跑通命令
 
@@ -751,6 +823,59 @@ python projects/olmoearth/tools/check_converted_det_dataset.py \
 ```bash
 python tools/train.py \
   projects/olmoearth/configs/olmoearth-base_faster-rcnn_1x_rslearn-detection-s2.py
+```
+
+### DOTA / DIOR-R / MMRotate RGB 路线
+
+先看数据目录属于哪一种：
+
+```bash
+find /path/to/data -maxdepth 3 -type d | sort
+find /path/to/data -maxdepth 4 -type f \( -name "*.txt" -o -name "*.xml" \) | head
+```
+
+如果是标准 DOTA split：
+
+```text
+trainval/images/*.png
+trainval/annfiles/*.txt
+```
+
+跑：
+
+```bash
+python tools/misc/print_config.py \
+  projects/olmoearth/configs/olmoearth-base_oriented-rcnn_1x_dota-rgb.py
+
+python tools/train.py \
+  projects/olmoearth/configs/olmoearth-base_oriented-rcnn_1x_dota-rgb.py \
+  --cfg-options train_cfg.max_epochs=1 default_hooks.logger.interval=1
+```
+
+如果是 DIOR-R oriented XML：
+
+```text
+JPEGImages-trainval/*.jpg
+JPEGImages-test/*.jpg
+Annotations/Oriented Bounding Boxes/*.xml
+ImageSets/Main/train.txt
+ImageSets/Main/test.txt
+```
+
+跑：
+
+```bash
+python tools/train.py \
+  projects/olmoearth/configs/olmoearth-base_oriented-rcnn_1x_dior-rgb.py \
+  --cfg-options train_cfg.max_epochs=1 default_hooks.logger.interval=1
+```
+
+如果 DIOR 已经被转换成 DOTA-like txt，则用：
+
+```bash
+python tools/train.py \
+  projects/olmoearth/configs/olmoearth-base_oriented-rcnn_1x_dior-dota-rgb.py \
+  --cfg-options train_cfg.max_epochs=1 default_hooks.logger.interval=1
 ```
 
 ### MMSeg manifest 路线
@@ -1011,6 +1136,54 @@ dict(
 
 这样普通 RGB 图像会映射到 Sentinel-2 的 B04/B03/B02 槽位，其余 band 缺失。
 
+## 迁移到 MMRotate
+
+### 数据集准备
+
+MMRotate 只负责旋转框。先判断标注格式：
+
+| 格式 | 目录/文件特征 | config |
+| --- | --- | --- |
+| DOTA | `annfiles/*.txt`，每行 8 个点 | `olmoearth-base_oriented-rcnn_1x_dota-rgb.py` |
+| DIOR-R XML | `Annotations/Oriented Bounding Boxes/*.xml`，含 `robndbox` | `olmoearth-base_oriented-rcnn_1x_dior-rgb.py` |
+| DIOR 转 DOTA | DIOR 类别名 + DOTA txt 行格式 | `olmoearth-base_oriented-rcnn_1x_dior-dota-rgb.py` |
+
+不要把水平框 DIOR XML 硬塞进 MMRotate。水平框 DIOR 更适合 MMDetection；
+DIOR-R 或 DOTA-like DIOR 才适合 MMRotate。
+
+### Box flow
+
+MMRotate pipeline 中 box 会经历：
+
+```text
+8 点 qbox
+  -> ConvertBoxType(qbox -> rbox)
+  -> rotated assigner / sampler
+  -> rotated bbox coder
+  -> nms_rotated
+  -> DOTAMetric
+```
+
+OLMoEarth 只替换 backbone 输入和 feature 输出，不改这条 rotated box 语义链。
+这也是迁移到 MMRotate 的关键：box、NMS、metric 继续使用框架原生实现。
+
+### Backbone 和 neck
+
+MMRotate 的 Oriented R-CNN 默认需要多尺度特征。本项目使用：
+
+```text
+OlmoEarthBackbone -> OlmoEarthMultiLevelNeck -> OrientedRPNHead -> Rotated ROI Head
+```
+
+`OlmoEarthMultiLevelNeck` 从一个 dense feature map 派生 5 个尺度：
+
+```text
+stride: patch_size, 2p, 4p, 8p, 16p
+scale:  1.0,        0.5, 0.25, 0.125, 0.0625
+```
+
+这是一种接口适配，不表示 OLMoEarth encoder 本身天然输出 FPN。
+
 ## 评估与可视化
 
 ### 分割
@@ -1034,7 +1207,8 @@ rslearn manifest 检测使用 `OlmoEarthDetMetric`：
 - 在多个 score threshold 下报告 F1、precision、recall。
 - 输出 best F1 对应的 TP/FP/FN，便于排查阈值问题。
 
-DIOR 这类常规数据集继续用 `VOCMetric` 或数据集标准 metric。
+原始 DIOR 水平框这类常规 MMDetection 数据集继续用 `VOCMetric` 或数据集标准
+metric。DOTA、DIOR-R 这类旋转框数据则交给 MMRotate 的 `DOTAMetric`。
 
 ## 常见问题与调试
 

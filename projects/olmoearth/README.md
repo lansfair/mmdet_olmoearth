@@ -3,8 +3,18 @@
 This project migrates the rslearn OLMoEarth detection path into MMDetection.
 It also includes a conventional OpenMMLab RGB detection example for DIOR.
 
+## Which OpenMMLab Project
+
+Use the OLMoEarth project that matches the downstream task:
+
+| Task | Project | Typical data |
+| --- | --- | --- |
+| Semantic segmentation | MMSegmentation | masks, valid masks, GeoTIFF manifests |
+| Horizontal-box detection | MMDetection | rslearn detection manifest, VOC/XML DIOR |
+| Oriented-box detection | MMRotate | DOTA txt, DIOR-R oriented XML |
+
 For a broader Chinese walkthrough covering both MMSegmentation and
-MMDetection, see
+MMDetection/MMRotate, see
 `projects/olmoearth/docs/olmoearth_openmmlab_migration_zh.md`.
 
 The initial target is the rslearn detection stack:
@@ -44,6 +54,9 @@ python projects/olmoearth/tools/convert_rslearn_det.py \
   --classes object \
   --property-name category
 ```
+
+The converter shows progress. If `tqdm` is installed it uses a progress bar;
+otherwise it prints periodic `current/total` updates.
 
 For point labels, pass `--box-size N` to match rslearn `DetectionTask` point to
 box conversion.
@@ -87,9 +100,10 @@ python tools/train.py \
 
 ## DIOR RGB Example
 
-DIOR is kept as a normal OpenMMLab XML-style dataset. The only OLMoEarth-specific
-part is the pipeline transform that maps RGB into normalized Sentinel-2 RGB
-slots before the OLMoEarth backbone.
+This example is for original DIOR horizontal boxes. DIOR is kept as a normal
+OpenMMLab XML-style dataset. The only OLMoEarth-specific part is the pipeline
+transform that maps RGB into normalized Sentinel-2 RGB slots before the
+OLMoEarth backbone.
 
 Expected layout:
 
@@ -100,6 +114,9 @@ data/DIOR/
   ImageSets/Main/train.txt
   ImageSets/Main/val.txt
 ```
+
+If your DIOR annotation is DIOR-R oriented XML or DOTA-like txt, use the
+MMRotate OLMoEarth project instead.
 
 Run:
 
