@@ -656,6 +656,17 @@ embedding.tif -> OlmoEarthFeatureBackbone -> patch-linear head
 优势是训练阶段不再反复跑 OLMoEarth encoder，更接近论文的线性探针评估方式。
 代价是 embedding 固定，不能端到端微调 backbone。
 
+这里要明确一个边界：`extract_embeddings.py` 不是标准 MMSeg Runner 训练流程。
+它会复用 MMSeg 的 config、registry、Dataset 和 pipeline 来构建同一批样本，但
+不会进入 `tools/train.py` 的 train loop，也不会走 optimizer、hook、scheduler。
+它只是以 inference mode 调用 OLMoEarth backbone，把 dense feature 物化为
+`embedding.tif`。随后 offline probe 再回到标准 MMSeg：`tools/train.py` 构建
+`OlmoEarthFeatureBackbone`，读取固定 embedding，并训练 patch-linear head。
+
+因此它是为了对齐 OLMoEarth 原论文线性探针和节省重复 encoder forward 的工程例外，
+不是通用的 MMSeg 数据读取范式。只要改了 checkpoint、`patch_size`、输入 pipeline、
+crop size、normalization 或 split，都应该重新抽 embedding。
+
 ### MMDet forward
 
 MMDet 检测路径类似，但后面接的是 detector：
@@ -1019,6 +1030,10 @@ python tools/train.py \
 
 offline probe 慢变快的原因很简单：原来每个 epoch 都前向 OLMoEarth encoder；
 现在先把 dense embedding 抽出来，训练时只读 embedding 并训练线性头。
+
+注意：抽 embedding 的第一步虽然读取 MMSeg config 和 dataset，但不是 MMSeg
+标准训练；它绕过 runner，只做一次离线特征物化。第二步训练 offline-linear config
+时，才是标准 MMSeg 训练流程。
 
 ## 迁移到 MMDetection
 
