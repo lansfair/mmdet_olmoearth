@@ -18,6 +18,68 @@
 - 分割：PASTIS、MADOS、Sen1Floods11、AWF、Nandi、Crop-Type、Potsdam。
 - 检测：rslearn detection manifest，以及 DIOR 这类常规 OpenMMLab RGB 数据集。
 
+## 如何阅读这份教程
+
+这份教程建议按三条路线阅读，不要一开始就把所有任务混在一起。
+
+### 路线 A：先跑通一个 OpenMMLab 实验
+
+适合已经熟悉 OpenMMLab，但还不了解 OlmoEarth 的读者。推荐从 RGB 数据集开始：
+
+```text
+DIOR / Potsdam
+  -> 原生 OpenMMLab Dataset
+  -> RGBToOlmoEarthS2
+  -> OlmoEarthBackbone
+  -> 常规 head 和 metric
+```
+
+这条路线最快，因为不需要先理解 rslearn，也不需要写转换脚本。它的目标是先确认
+环境、权重、registry、forward 都能跑通。
+
+### 路线 B：复现 OlmoEarth 论文下游任务
+
+适合关心论文精度对齐的读者。推荐从 PASTIS 或 Crop-Type 开始：
+
+```text
+PASTIS / MADOS / Sen1Floods11
+  -> OLMoEarth 已处理 eval tensor
+  -> GeoTIFF + manifest
+  -> 冻结 backbone + linear probe
+
+AWF / Nandi
+  -> rslearn dataset
+  -> converter 物化 raster/label/valid/timestamp
+  -> GeoTIFF + manifest
+```
+
+这条路线要优先对齐 label、valid mask、timestamp、band order 和 metric。只要这些
+语义错了，即使模型代码能跑，精度也没有可比性。
+
+### 路线 C：迁移自己的遥感数据集
+
+适合要把新数据接到 OlmoEarth 的读者。先回答下面几个问题：
+
+```text
+你的数据是 RGB 图片 + VOC/COCO/XML 标注？
+  -> 优先用 OpenMMLab 原生 Dataset，只加 RGB adapter。
+
+你的数据是多波段 GeoTIFF + mask/box？
+  -> 可以直接写 manifest，或写轻量 Dataset。
+
+你的数据依赖 rslearn raster/vector layer？
+  -> 先写 converter，把 rslearn 输出物化成 GeoTIFF + manifest。
+
+你的目标是论文复现？
+  -> 保留 valid mask、timestamp、band order、ignore label。
+
+你的目标是工程实验？
+  -> 优先使用 OpenMMLab 原生 Dataset、metric 和可视化工具。
+```
+
+这个决策树比“所有数据都转成同一种格式”更重要。迁移不是追求形式统一，而是
+尽量少损失原任务语义，同时尽量多复用 OpenMMLab 的训练生态。
+
 ## 环境准备
 
 推荐把 OpenMMLab 和 OlmoEarth 放在同一个环境里，避免权重和依赖在不同
@@ -242,6 +304,105 @@ COCO/VOC 字段会导致“能训练但语义不透明”。
 
 换句话说：原始格式已经是 OpenMMLab 擅长的，就不要为了 OLMoEarth 强行转换；
 原始格式依赖 rslearn/OLMoEarth 内部 task 语义的，就先转换成 manifest。
+
+### 数据流转总图
+
+完整的数据迁移可以拆成六层。每层都应该能单独检查，不要等训练报错时才回头
+猜是哪一层坏了。
+
+```text
+Layer 0: 原始数据
+  rslearn dataset / OLMoEarth eval tensor / RGB 图片数据集
+
+Layer 1: converter 或原生 Dataset 选择
+  convert_xxx.py / XMLDataset / PotsdamDataset / GeoBench loader
+
+Layer 2: 物化后的数据
+  raw GeoTIFF + label GeoTIFF + valid mask GeoTIFF + manifest JSON
+
+Layer 3: OpenMMLab data_info / results
+  Dataset.load_data_list() 输出路径和元数据
+  pipeline 读取数组并做增强、归一化、adapter
+
+Layer 4: DataSample
+  SegDataSample / DetDataSample 保存 gt、metainfo、valid mask
+
+Layer 5: model forward
+  wrapper 把 metainfo 交给 backbone
+  backbone 构造 MaskedOlmoEarthSample
+  head 计算 loss 或 prediction
+```
+
+每层的检查工具也不同：
+
+| 层级 | 检查方法 | 典型问题 |
+| --- | --- | --- |
+| 原始数据 | 打开样本、统计类别、查看 split | 数据集路径错、split 空 |
+| converter | 看输出文件数量和 summary | label 越界、valid 全 0 |
+| manifest | `check_converted_dataset.py` / `check_converted_det_dataset.py` | 路径丢失、box 越界 |
+| pipeline | `check_pipeline.py` 或构建 dataloader 取一个 batch | img/label/mask 尺寸不一致 |
+| model | `check_forward.py` 或 1 iter train | channel、T、band order 不匹配 |
+| metric | 跑一次 val/test | ignore_index、valid mask、类别数不一致 |
+
+### 三种格式不要混淆
+
+迁移时最容易混淆的是 manifest sample、OpenMMLab `data_info/results` 和
+`DataSample`。它们不是同一个东西。
+
+| 阶段 | 谁产生 | 主要内容 | 是否包含真实数组 |
+| --- | --- | --- | --- |
+| manifest sample | converter | 路径、label 路径、bbox、timestamp、band 元数据 | 否 |
+| data_info | Dataset | 解析后的绝对路径、类别、尺寸、instances | 否 |
+| results | pipeline 中间态 | `img`、`gt_seg_map`、增强信息、归一化后数组 | 是 |
+| DataSample | Pack transform | gt、metainfo、预测结果容器 | gt 是 tensor，metainfo 是字典 |
+
+为什么要拆这么细：OpenMMLab 的 pipeline 会不断修改 `results`，比如 crop/flip/resize
+会同步改 image 和 label；而 `DataSample.metainfo` 是最终传给模型和可视化的元数据。
+OlmoEarth 的 timestamps、present_bands 必须从 manifest 一路保留到 metainfo，
+否则 backbone 只能使用默认时间和默认全 band，精度语义就变了。
+
+### 数据集迁移时必须保留的字段
+
+不同任务字段不完全一样，但下面这些字段最好在转换时显式写出来。
+
+分割：
+
+| 字段 | 是否必需 | 用途 |
+| --- | --- | --- |
+| `sample_id` | 推荐 | debug、可视化、错误定位 |
+| `img_paths` | 必需 | 每个时相一个 GeoTIFF |
+| `seg_map_path` | 必需 | segmentation label |
+| `valid_mask_path` | 论文复现任务推荐 | 过滤无效像素 |
+| `timestamps` | 推荐 | 构造 OLMoEarth temporal encoding |
+| `present_bands` | RGB/缺 band 必需 | 构造 missing mask |
+| `olmoearth_modality` | 推荐 | 明确走哪个 sample field |
+| `olmoearth_num_timesteps` | 推荐 | 和 config 的 T 互相校验 |
+
+检测：
+
+| 字段 | 是否必需 | 用途 |
+| --- | --- | --- |
+| `sample_id` | 推荐 | debug、可视化、错误定位 |
+| `img_paths` | 必需 | 单时相或多时相 GeoTIFF |
+| `height/width` | 必需 | box 检查和 Dataset 信息 |
+| `bboxes` | 必需 | xyxy 格式检测框 |
+| `labels` | 必需 | 0-based 类别 id |
+| `valid` | rslearn 任务必需 | 跳过无效样本或 metric 过滤 |
+| `timestamps` | 推荐 | 构造 temporal encoding |
+| `present_bands` | RGB/缺 band 必需 | 构造 missing mask |
+| `rslearn` | 可选但推荐 | 保留 source_index/window 等调试信息 |
+
+### 迁移后为什么更好调试
+
+使用 manifest 后，很多问题可以在训练前发现。
+
+| 旧方式：训练时包 rslearn | 新方式：manifest |
+| --- | --- |
+| 数据读取逻辑藏在 `__getitem__` 内部 | JSON 可直接看到每个样本的输入和标签 |
+| OpenMMLab 很难提前 filter/serialize | Dataset 可以正常走 OpenMMLab 生命周期 |
+| 报错常发生在 DataLoader worker 内 | checker 可以先单进程检查路径和 label |
+| 时间、band、valid 语义不透明 | 关键字段显式保存在 sample 里 |
+| 换服务器/环境时 rslearn 依赖重 | 训练阶段只依赖 GeoTIFF + OpenMMLab |
 
 ## 模型迁移：OpenMMLab 通常要迁哪些东西
 
@@ -495,6 +656,128 @@ detection manifest / XMLDataset
 为什么 MMDet 需要 neck：Faster R-CNN/FPN 系列默认消费多尺度 feature。OlmoEarth
 不像 ResNet 那样天然输出 C2/C3/C4/C5，所以需要把单个 dense map 派生成多个尺度。
 这不是让 OlmoEarth 真的变成 FPN backbone，而是满足 RPN/RoIHead 的接口假设。
+
+### Shape trace：MMSeg 多时相 Sentinel-2
+
+假设一个 PASTIS 样本有 `T=12` 个时相，每个时相是 `C=12` 个 Sentinel-2 band，
+crop 后大小为 `H=W=128`，batch size 为 `B=4`。
+
+| 步骤 | 张量形状 | 说明 |
+| --- | --- | --- |
+| 单个 GeoTIFF | `C,H,W = 12,128,128` | 每个时相一个多 band tif |
+| stack 多时相 | `T,C,H,W = 12,12,128,128` | `img_paths` 列表读入 |
+| flatten 给 MMSeg | `H,W,C*T = 128,128,144` | pipeline 中间态 |
+| Pack 后 | `C*T,H,W = 144,128,128` | `inputs` |
+| batch 后 | `B,C*T,H,W = 4,144,128,128` | data preprocessor 输出 |
+| backbone 内部 reshape | `B,H,W,T,C = 4,128,128,12,12` | 还原 OLMoEarth 输入 |
+| encoder 输出 feature | `B,D,H/p,W/p` | `p=4` 时是 `4,768,32,32` |
+| decode head logits | `B,num_classes,H,W` | 上采样回 label 尺寸 |
+
+如果这里任何一行对不上，先不要怀疑模型，先检查 manifest 的 `img_paths` 数量、
+config 的 `num_timesteps`、band order 和 pipeline 顺序。
+
+### Shape trace：MMDet DIOR RGB
+
+假设 DIOR 图片 resize 后近似 `800 x 800`，batch size 为 `B=4`，`patch_size=8`。
+
+| 步骤 | 张量形状 | 说明 |
+| --- | --- | --- |
+| LoadImageFromFile | `H,W,3` | OpenMMLab 常规 BGR/RGB 图片 |
+| RGBToOlmoEarthS2 | `H,W,12` | 只写 B04/B03/B02，其他 band 缺失 |
+| PackDetInputs | `12,H,W` | DetDataSample 保存 bbox 和 metainfo |
+| batch 后 | `B,12,H,W` | DetDataPreProcessor 输出 |
+| backbone 内部 reshape | `B,H,W,1,12` | 单时相 Sentinel-2 兼容输入 |
+| encoder 输出 feature | `B,768,H/8,W/8` | 单个 dense feature map |
+| MultiLevelNeck | 4 个尺度 | stride 为 `8,16,32,64` |
+| RPN/RoIHead | proposals / boxes | 按 Faster R-CNN 逻辑训练或推理 |
+
+DIOR 这条路径没有真实 NIR/SWIR/red-edge band。shape 看起来像 Sentinel-2，
+但语义上是 RGB compatibility。
+
+## 最小跑通命令
+
+学习迁移时不要直接开长训练。建议按“config -> dataset -> forward -> train”的顺序
+逐步加复杂度。
+
+### DIOR / MMDet RGB 路线
+
+先确认 config 能解析：
+
+```bash
+python tools/misc/print_config.py \
+  projects/olmoearth/configs/olmoearth-base_faster-rcnn_1x_dior-rgb.py
+```
+
+然后跑一个很短的训练，先看 dataloader、forward、loss 是否正常：
+
+```bash
+python tools/train.py \
+  projects/olmoearth/configs/olmoearth-base_faster-rcnn_1x_dior-rgb.py \
+  --cfg-options train_cfg.max_epochs=1 default_hooks.logger.interval=1
+```
+
+如果已经有 checkpoint，再测试：
+
+```bash
+python tools/test.py \
+  projects/olmoearth/configs/olmoearth-base_faster-rcnn_1x_dior-rgb.py \
+  work_dirs/olmoearth-base_faster-rcnn_dior-rgb/latest.pth
+```
+
+### rslearn detection / MMDet manifest 路线
+
+先转换：
+
+```bash
+python projects/olmoearth/tools/convert_rslearn_det.py \
+  --input-root /path/to/rslearn_dataset \
+  --output-root data/rslearn_detection_manifest \
+  --image-layers sentinel2 \
+  --target-layers label \
+  --classes object \
+  --property-name category
+```
+
+再检查 manifest：
+
+```bash
+python projects/olmoearth/tools/check_converted_det_dataset.py \
+  --data-root data/rslearn_detection_manifest \
+  --ann-file train.json
+```
+
+最后训练：
+
+```bash
+python tools/train.py \
+  projects/olmoearth/configs/olmoearth-base_faster-rcnn_1x_rslearn-detection-s2.py
+```
+
+### MMSeg manifest 路线
+
+以 PASTIS 为例：
+
+```bash
+python projects/olmoearth/tools/convert_pastis.py \
+  --input-root /path/to/pastis_r \
+  --output-root data/olmoearth_mmseg/pastis
+
+python projects/olmoearth/tools/check_converted_dataset.py \
+  --data-root data/olmoearth_mmseg/pastis \
+  --ann-file train.json
+
+python projects/olmoearth/tools/check_pipeline.py \
+  projects/olmoearth/configs/pastis/olmoearth-base_4xb4-50e_pastis-s2.py \
+  --split train
+
+python projects/olmoearth/tools/check_forward.py \
+  projects/olmoearth/configs/pastis/olmoearth-base_4xb4-50e_pastis-s2.py \
+  --split train \
+  --device cuda
+```
+
+`check_pipeline.py` 用来确认数据增强和 pack 后的 tensor 对齐；`check_forward.py`
+用来确认模型能计算一次 loss。它们比完整训练便宜得多。
 
 ## 迁移到 MMSegmentation
 
@@ -812,6 +1095,32 @@ OlmoEarth 的 dense encoder 通过 `patch_size` 控制输出 stride。不要把�
 - `patch_size=4`：细节好，显存高。
 - `patch_size=16`：显存低，输出更粗。
 
+### 报错索引
+
+| 报错或现象 | 大概率原因 | 先检查哪里 | 处理方式 |
+| --- | --- | --- | --- |
+| `Expected 144 channels, got 36` | `num_timesteps` 或 band 数不一致 | manifest `img_paths`、config `num_timesteps` | 让 T 和 `C*T` 对齐 |
+| `Sort currently does not support bool dtype on CUDA` | PyTorch 2.3 bool sort 限制 | backbone 兼容补丁是否存在 | 保留 bool->uint8 sort patch |
+| `LatentMIM.forward() got unexpected keyword fast_pass` | OLMoEarth 版本 forward 签名不同 | backbone 调用 encoder 的位置 | 做 signature 兼容或升级代码 |
+| CUDA `device-side assert triggered` | label 越界或 ignore_index 错 | label 取值、num_classes、ignore_index | 跑 dataset checker，修类别映射 |
+| mIoU 很低但 loss 正常下降 | ignore/valid mask 没对齐 | valid mask、metric `use_valid_mask` | 确认 pad/crop 同步作用到 mask |
+| mAP/F1 全 0 | bbox 坐标或类别错 | manifest `bboxes/labels` | 检查 xyxy、0-based label、图片尺寸 |
+| `No such file or directory` | `data_root`、路径空格或相对路径错 | config 顶部路径、manifest 路径 | 用绝对路径，manifest 路径相对 data_root |
+| `KeyError: modality/band` | modality 名或 band order 错 | `olmoearth_modality`、`band_names` | 使用 OLMoEarth 定义的 band order |
+| 显存异常低 | backbone 可能冻结或没跑 | optimizer params、日志、显存曲线 | 检查 `requires_grad` 和 offline/online 路径 |
+| 显存异常高 | patch_size 小、crop 大、batch 大 | config crop、patch_size、batch size | 调大 patch_size 或减小 crop/batch |
+
+排错顺序建议固定为：
+
+```text
+路径是否存在
+  -> manifest 字段是否完整
+  -> label/box 是否合法
+  -> pipeline 输出 shape 是否对
+  -> backbone 输入 channel/T 是否对
+  -> metric 是否对齐 ignore/valid
+```
+
 ## 进阶方向
 
 ### 多波段与多模态
@@ -866,3 +1175,55 @@ manifest 的好处是可以自然扩展：
 
 5. 能先检查数据，就不要先跑训练。
    先跑 manifest checker、pipeline checker、forward checker，再开长训练。
+
+## 迁移 Checklist
+
+真正迁移一个新数据集时，可以按下面的清单逐项打勾。
+
+### 数据 Checklist
+
+- 原始数据的 split 是否明确，train/val/test 是否为空。
+- 图像是 RGB、单时相多波段，还是多时相多波段。
+- band order 是否和 OLMoEarth modality 对齐。
+- 原始数值范围是否明确：0-255、0-1、0-10000，还是已经归一化。
+- label 是否是 0-based。
+- ignore label 是否统一成 OpenMMLab 的 `ignore_index`。
+- valid mask 是否需要参与 loss 或 metric。
+- detection bbox 是否是 xyxy，且没有越界。
+- class names 是否和 config 的 `num_classes` 对齐。
+- manifest 路径是否都相对 `data_root`，或使用绝对路径。
+
+### Pipeline Checklist
+
+- image、label、valid mask 是否一起 crop/flip/pad。
+- RGB 数据是否显式使用 `RGBToOlmoEarthS2`。
+- 多波段数据是否使用 OLMoEarth normalization，而不是 ImageNet mean/std。
+- `PackOlmoEarthSegInputs` / `PackDetInputs` 是否保留 timestamps 和 present_bands。
+- data preprocessor 的 pad size 是否和 head/backbone stride 兼容。
+
+### 模型 Checklist
+
+- `model.backbone.model_config_path` 是否指向 OLMoEarth `config.json`。
+- `model.backbone.init_cfg.checkpoint` 是否指向 OLMoEarth `weights.pth`。
+- 顶层 `load_from` 是否只用于完整 OpenMMLab checkpoint。
+- `num_timesteps` 是否和 manifest 的 `img_paths` 数量一致。
+- `patch_size` 是否和期望输出 stride 一致。
+- 检测任务是否需要 multi-level neck。
+- 分割任务是 paper-style linear probe，还是 UPerNet 工程实验。
+- backbone 是否应该冻结，是否和实验目标一致。
+
+### 评估 Checklist
+
+- 分割是否需要 valid mask filtering。
+- 检测是用数据集标准 mAP，还是 rslearn-style F1。
+- `ignore_index` 是否和 label 里的 ignore 值一致。
+- 可视化是否能处理多波段输入。
+- 评价前是否先跑过一个小 batch 的 forward。
+
+### 复现实验 Checklist
+
+- 是否使用论文对应的数据预处理，而不是为了方便换成 RGB adapter。
+- 是否冻结了论文线性探针中应该冻结的部分。
+- 是否保留了原任务的 timestamp、valid mask、ignore label。
+- 是否使用和原任务一致的 metric。
+- 是否记录了 patch_size、crop_size、batch size、学习率和随机种子。
