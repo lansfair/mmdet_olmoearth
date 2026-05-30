@@ -1,23 +1,41 @@
 # OlmoEarth -> MMSeg / MMDet / MMRotate 迁移教程
 
-这份文档总结当前项目里 OlmoEarth 迁移到 OpenMMLab 的做法。它不是
-“把代码能跑起来”的流水账，而是解释为什么要做这些适配，以及哪些地方
-必须对齐原论文，哪些地方只是工程便利。
+这份文档面向想学习“如何把一个非 OpenMMLab 模型迁移到 MMSeg / MMDet /
+MMRotate，并尽量复现实验”的读者。它不是只告诉你哪条命令能跑，而是拆开
+迁移时必须处理的边界：数据格式、模型 forward、权重加载、训练范式、评估语义。
+
+OlmoEarth 只是这里的案例。真正希望读者学会的是：面对一个原项目模型时，如何判断
+哪些逻辑应该保留原实现，哪些逻辑应该改写成 OpenMMLab 原生组件，以及哪些改动会
+影响论文结果复现。
 
 ## 教程目标
 
-读完以后应该能回答三个问题：
+读完以后应该能回答五个问题：
 
 1. OlmoEarth Backbone 的输入、输出和普通 ResNet/ViT 有什么不同。
 2. 如何在 MMSegmentation / MMDetection / MMRotate 里接入 OlmoEarth 做遥感下游任务。
 3. 为什么本项目选择 manifest、OpenMMLab Dataset、`init_cfg`、neck/head 适配，
    而不是训练时直接包一层 rslearn。
+4. 如何判断一个数据集应该转 manifest，还是继续使用 OpenMMLab 原生 Dataset。
+5. 如何区分“论文复现路径”和“OpenMMLab 工程实验路径”。
 
-最终能跑通两条路径：
+最终能跑通三类实验，并理解每一类为什么这样迁移：
 
 - 分割：PASTIS、MADOS、Sen1Floods11、AWF、Nandi、Crop-Type、Potsdam。
 - 水平框检测：rslearn detection manifest，以及原始 DIOR 这类常规 OpenMMLab RGB 数据集。
 - 旋转框检测：DOTA、DIOR-R、DOTA-like DIOR，走 MMRotate 原生 rotated 组件。
+
+对学习迁移的人来说，最重要的不是背这个项目里的类名，而是建立四个 contract：
+
+| Contract | 要回答的问题 | 本项目里的例子 |
+| --- | --- | --- |
+| 数据 contract | OpenMMLab Dataset 最终给 pipeline 什么字段 | manifest、`img_paths`、`timestamps`、`present_bands` |
+| 模型 contract | Backbone 接收什么 tensor，输出什么 feature | `B,C*T,H,W` 还原成 `B,H,W,T,C`，输出 dense map |
+| 训练 contract | 哪些参数训练，哪些参数冻结，权重从哪里加载 | `init_cfg` 加载 OLMoEarth，linear probe 冻结 backbone |
+| 评估 contract | metric 是否和原论文/数据集语义一致 | valid mask、ignore index、DOTA rotated mAP、rslearn F1 |
+
+只要这四个 contract 写清楚，迁移其他 foundation model、遥感模型或普通视觉模型时，
+也可以沿用同样的分析方法。
 
 ## 如何阅读这份教程
 
@@ -99,6 +117,28 @@ AWF / Nandi
 
 这个决策树比“所有数据都转成同一种格式”更重要。迁移不是追求形式统一，而是
 尽量少损失原任务语义，同时尽量多复用 OpenMMLab 的训练生态。
+
+### Config 导航表
+
+学习迁移时，建议先把每个 config 放进正确语境里：
+
+| Config | 框架 | 任务 | 输入 | 迁移目的 | 是否论文复现路径 |
+| --- | --- | --- | --- | --- | --- |
+| `configs/pastis/olmoearth-base_4xb4-50e_pastis-s2.py` | MMSeg | 分割 | S2 manifest | 线性探针复现 | 是 |
+| `configs/mados/olmoearth-base_4xb4-50e_mados-s2.py` | MMSeg | 分割 | S2 manifest | 线性探针复现 | 是 |
+| `configs/sen1floods11/olmoearth-base_4xb4-50e_sen1floods11-s1.py` | MMSeg | 分割 | S1 manifest | 线性探针复现 | 是 |
+| `configs/awf/olmoearth-base_4xb4-100e_awf-s2.py` | MMSeg | 分割 | rslearn 转 manifest | 对齐 rslearn 任务语义 | 接近论文任务 |
+| `configs/nandi/olmoearth-base_4xb4-100e_nandi-s2.py` | MMSeg | 分割 | rslearn 转 manifest | 对齐 rslearn 任务语义 | 接近论文任务 |
+| `configs/crop_type/olmoearth-base_1xb8-50e_crop-type-s2-linear.py` | MMSeg | 分割 | GEO-Bench S2 | online linear probe | 是 |
+| `configs/crop_type/olmoearth-base_1xb8-50e_crop-type-s2-offline-linear.py` | MMSeg | 分割 | embedding GeoTIFF | offline linear probe | 是，但有离线缓存例外 |
+| `configs/potsdam/olmoearth-base_upernet_4xb4-80k_potsdam-rgb-p4-512x512.py` | MMSeg | 分割 | RGB adapter | UPerNet 工程实验 | 否 |
+| `configs/olmoearth-base_faster-rcnn_1x_rslearn-detection-s2.py` | MMDet | 水平框检测 | rslearn detection manifest | 对齐 rslearn detection | 接近原任务 |
+| `configs/olmoearth-base_faster-rcnn_1x_dior-rgb.py` | MMDet | 水平框检测 | RGB adapter | OpenMMLab DIOR 示例 | 否 |
+| `configs/olmoearth-base_oriented-rcnn_1x_dota-rgb.py` | MMRotate | 旋转框检测 | RGB adapter | DOTA rotated 示例 | 否 |
+| `configs/olmoearth-base_oriented-rcnn_1x_dior-rgb.py` | MMRotate | 旋转框检测 | RGB adapter | DIOR-R rotated 示例 | 否 |
+
+表里的“否”不是说实验没有价值，而是提醒：RGB adapter 或常规遥感图片数据集不等于
+OLMoEarth 论文中的多光谱/多时相设置，结果不能直接当成论文复现数值。
 
 ## 环境准备
 
@@ -1364,6 +1404,63 @@ manifest 的好处是可以自然扩展：
 
 5. 能先检查数据，就不要先跑训练。
    先跑 manifest checker、pipeline checker、forward checker，再开长训练。
+
+## 通用迁移模板
+
+如果把 OlmoEarth 换成另一个非 OpenMMLab 模型，也可以按同样顺序迁移。
+
+### Step 1：拆原项目
+
+先不要急着写 OpenMMLab config，先回答：
+
+| 问题 | 为什么重要 |
+| --- | --- |
+| 原项目 Dataset 最终返回什么字段 | 决定是否转 manifest、写 Dataset、还是用原生 Dataset |
+| 模型 `forward` 真实需要哪些输入 | 决定 backbone wrapper 要从 DataSample metainfo 里拿什么 |
+| 权重文件是什么结构 | 决定用 `init_cfg`、自定义 `init_weights`，还是顶层 `load_from` |
+| 训练时哪些模块冻结 | 决定 optimizer paramwise、`requires_grad` 和复现设置 |
+| metric 如何计算 | 决定用 OpenMMLab 原生 metric 还是自定义 metric |
+
+### Step 2：定 OpenMMLab 边界
+
+迁移时尽量让 OpenMMLab 管 OpenMMLab 擅长的部分：
+
+| 交给 OpenMMLab | 从原项目保留 |
+| --- | --- |
+| runner、optimizer、hook、DDP、AMP、checkpoint | 模型结构、权重命名、核心数学算子 |
+| Dataset 生命周期、sampler、pipeline、DataSample | 特殊输入语义，如 timestamp、mask、band order |
+| 原生 metric，如 IoU/VOC/DOTA | 原论文特有 valid mask、F1、ignore 规则 |
+
+如果一个逻辑影响论文精度，就不要为了“更像 OpenMMLab”随便改；如果一个逻辑只是
+训练工程控制，就应该尽量交给 OpenMMLab。
+
+### Step 3：先建最小闭环
+
+最小闭环不是完整训练，而是：
+
+```text
+config 可解析
+  -> Dataset 能取一个样本
+  -> pipeline 后 tensor shape 正确
+  -> model 能算一次 loss
+  -> metric 能跑一次 val
+```
+
+只有这个闭环稳定后，再讨论长训练、调参和复现实验。
+
+### Step 4：写清楚复现边界
+
+每个 config 都应该能回答：
+
+| 问题 | 例子 |
+| --- | --- |
+| 是否论文复现 | PASTIS/Crop-Type linear probe 是，Potsdam/DIOR RGB 不是 |
+| 是否冻结 backbone | linear probe 冻结，UPerNet/检测实验可训练 |
+| 输入是否同分布 | Sentinel-2 是，RGB adapter 不是 |
+| metric 是否同原论文 | valid-mask IoU/F1 需要特别说明 |
+| 是否有离线缓存 | embedding 有，online 训练没有 |
+
+这样其他人学习迁移时，看到一个结果就知道它代表什么，也知道不能和哪些结果直接比较。
 
 ## 迁移 Checklist
 
