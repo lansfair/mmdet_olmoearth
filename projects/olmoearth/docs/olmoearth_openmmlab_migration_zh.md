@@ -291,6 +291,134 @@ COCO/VOC 字段会导致“能训练但语义不透明”。
 原因是这些东西属于训练框架生命周期。OpenMMLab 已经有 runner、sampler、
 hook、DDP、AMP、checkpoint 语义；硬搬会让两个框架互相抢控制权。
 
+## RGB 输入如何适配 OlmoEarth
+
+RGB 是本项目里最需要强调边界的适配。它的目的不是把 RGB 数据“变成真实
+Sentinel-2”，而是让 Potsdam、DIOR 这类普通 RGB 遥感数据能走同一个
+OlmoEarth backbone 接口。
+
+### 为什么需要 adapter
+
+OlmoEarth 的 Sentinel-2 L2A 分支期望的是 12 个 band：
+
+```text
+B02, B03, B04, B08, B05, B06, B07, B8A, B11, B12, B01, B09
+```
+
+普通 RGB 图像只有 3 个通道，没有近红外、红边、SWIR，也没有真实的 Sentinel-2
+辐射尺度。如果直接把 RGB 当成前三个 S2 band 输入，会同时错两个东西：
+
+- band 语义错：RGB 的 R/G/B 不等于 OLMoEarth band order 的前三个 B02/B03/B04。
+- 数值尺度错：PNG/JPG 通常是 0-255，OLMoEarth S2 归一化按 0-10000 反射率尺度。
+
+所以我们显式写了 `RGBToOlmoEarthS2`，让这种适配在 config 里可见，而不是
+悄悄藏在 Dataset 里。
+
+### 映射规则
+
+映射关系固定为：
+
+```text
+R -> Sentinel-2 B04
+G -> Sentinel-2 B03
+B -> Sentinel-2 B02
+```
+
+OpenMMLab 的 `LoadImageFromFile` 默认通过 cv2/mmcv 读图，常见输出是 BGR
+顺序，所以 Potsdam 和 DIOR config 里写的是：
+
+```python
+dict(
+    type="RGBToOlmoEarthS2",
+    num_timesteps=1,
+    rgb_channel_order="BGR",
+    input_value_range="0_255",
+)
+```
+
+如果你的 pipeline 已经把图像转成 RGB，就要改成：
+
+```python
+rgb_channel_order="RGB"
+```
+
+### 数值怎么处理
+
+`RGBToOlmoEarthS2` 先把输入转到近似 Sentinel-2 反射率尺度：
+
+```text
+0-255 RGB -> value * (10000 / 255)
+0-1 RGB   -> value * 10000
+s2        -> 不缩放，认为已经是 S2 尺度
+```
+
+然后只对 B04/B03/B02 三个槽位应用 OLMoEarth 的 Sentinel-2 computed
+normalization：
+
+```text
+normalized = (value - (mean - 2 * std)) / ((mean + 2 * std) - (mean - 2 * std))
+```
+
+这和真实 Sentinel-2 输入使用的是同一套 OLMoEarth computed stats。区别是：
+真实 S2 的 12 个 band 都有观测值；RGB adapter 只有 3 个 band 有观测值。
+
+### 缺失 band 怎么表达
+
+adapter 会创建完整的 12-band Sentinel-2 L2A 通道布局：
+
+```text
+输出通道数 = 12 * num_timesteps
+```
+
+其中：
+
+- B04/B03/B02 写入由 RGB 映射来的归一化值。
+- 其他 Sentinel-2 band 填 0。
+- `present_bands = ["B04", "B03", "B02"]`。
+
+后面 `OlmoEarthBackbone` 会根据 `present_bands` 构造 bandset mask。也就是说，
+缺失 band 不只是数值填 0，更重要的是 mask 会告诉 OLMoEarth：这些 band 没有
+真实观测，不应该当成完整 Sentinel-2 样本。
+
+### RGB 适配前后对比
+
+| 项目 | RGB 原图 | adapter 后 |
+| --- | --- | --- |
+| shape | `H x W x 3` | `H x W x 12*T` |
+| 通道顺序 | RGB 或 BGR | OLMoEarth Sentinel-2 band order |
+| 数值范围 | 0-255 或 0-1 | 先近似到 0-10000，再按 S2 stats 归一化 |
+| 缺失 band | 无法表达 | 通过 `present_bands` 和 mask 表达 |
+| 任务定位 | 常规 RGB 遥感 | OLMoEarth out-of-domain 兼容实验 |
+
+### 为什么不把 RGB 转成 tif manifest
+
+Potsdam/DIOR 本身就是 OpenMMLab 能直接读取的图片数据集。对它们来说，最干净
+的做法是保留原生 Dataset：
+
+```text
+Potsdam: MMSeg PotsdamDataset / OlmoEarthPotsdamDataset
+DIOR:    MMDet XMLDataset
+```
+
+然后只在 pipeline 里加 `RGBToOlmoEarthS2`。这样类别映射、split、metric、
+可视化都继续按 OpenMMLab 原生态走，只有进入 backbone 前的通道适配是
+OLMoEarth 特有的。
+
+如果强行把 RGB 也预转换成 manifest，会多出一份数据副本，但没有新增真实
+遥感信息，反而让常规数据集调试更绕。
+
+### RGB 适配的局限
+
+这一路径不能声称复现 OLMoEarth 论文中的 Sentinel-2 多光谱性能。原因很直接：
+
+- 没有 NIR、red edge、SWIR 等 band。
+- 没有真实多时相观测，通常 `num_timesteps=1`。
+- 数值尺度只是近似映射到 S2 反射率范围。
+- OLMoEarth 的预训练分布是多模态遥感，不是普通 RGB PNG/JPG。
+
+因此文档和 config 里都把它称为 RGB compatibility path。它适合做 Potsdam/DIOR
+这类工程实验，不适合作为论文精度对齐的主路径。
+
 ## 推理和训练的 forward 逻辑
 
 ### MMSeg online forward
