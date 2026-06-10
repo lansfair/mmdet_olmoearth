@@ -69,19 +69,33 @@ class DINOv3ViTBackbone(BaseModule):
                 f"DINOv3 repo_dir does not exist: {repo_dir}"
             )
         kwargs = dict(self.hub_kwargs)
+        weights_path = None
         if self.weights_path is not None:
             weights_path = Path(self.weights_path)
             if not weights_path.exists():
                 raise FileNotFoundError(
                     f"DINOv3 weights_path does not exist: {weights_path}"
                 )
-            kwargs.setdefault("weights", str(weights_path))
-        return torch.hub.load(
+            kwargs["weights"] = str(weights_path)
+            kwargs["pretrained"] = False
+        model = torch.hub.load(
             str(repo_dir),
             self.model_name,
             source="local",
             **kwargs,
         )
+        if weights_path is not None:
+            checkpoint = torch.load(
+                str(weights_path),
+                map_location="cpu",
+            )
+            if isinstance(checkpoint, dict):
+                checkpoint = checkpoint.get(
+                    "state_dict",
+                    checkpoint.get("model", checkpoint),
+                )
+            model.load_state_dict(checkpoint, strict=True)
+        return model
 
     def init_weights(self) -> None:
         """Keep pretrained DINOv3 weights loaded by ``torch.hub.load``."""
