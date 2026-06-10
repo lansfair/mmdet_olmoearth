@@ -260,7 +260,7 @@ param_scheduler = [
     ),
 ]
 
-train_cfg = dict(type="EpochBasedTrainLoop", max_epochs=50, val_interval=5)
+train_cfg = dict(type="EpochBasedTrainLoop", max_epochs=50, val_interval=1)
 val_cfg = dict(type="ValLoop")
 test_cfg = dict(type="TestLoop")
 
@@ -271,7 +271,7 @@ default_hooks = dict(
     param_scheduler=dict(type="ParamSchedulerHook"),
     checkpoint=dict(
         type="CheckpointHook",
-        interval=5,
+        interval=1,
         save_best="auto",
         max_keep_ckpts=3,
     ),
