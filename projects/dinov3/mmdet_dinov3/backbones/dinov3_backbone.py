@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import torch
+from mmengine.logging import MMLogger
 from mmengine.model import BaseModule
 from mmdet.registry import MODELS
 from torch import Tensor
@@ -94,11 +95,18 @@ class DINOv3ViTBackbone(BaseModule):
                     "state_dict",
                     checkpoint.get("model", checkpoint),
                 )
-            model.load_state_dict(checkpoint, strict=True)
+            incompatible = model.load_state_dict(checkpoint, strict=True)
+            logger = MMLogger.get_current_instance()
+            logger.info(
+                "Loaded DINOv3 backbone weights from local path: "
+                f"{weights_path}. "
+                f"missing_keys={len(incompatible.missing_keys)}, "
+                f"unexpected_keys={len(incompatible.unexpected_keys)}"
+            )
         return model
 
     def init_weights(self) -> None:
-        """Keep pretrained DINOv3 weights loaded by ``torch.hub.load``."""
+        """Keep DINOv3 weights loaded during model construction."""
         return
 
     def train(self, mode: bool = True):
