@@ -5,7 +5,7 @@ custom_imports = dict(
     allow_failed_imports=False,
 )
 
-data_root = "/mnt/ht2-nas2/EO test/zyf/data/DIOR"
+data_root = "/mnt/ht2-nas2/EO_test/zyf/data/DIOR"
 dinov3_root = "/mnt/ht2-nas2/EO_test/dataset/dinov3_pretrained"
 dinov3_repo_dir = "projects/dinov3/dinov3-main"
 dinov3_weights_path = (
