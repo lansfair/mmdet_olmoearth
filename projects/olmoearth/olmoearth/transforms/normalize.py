@@ -150,3 +150,71 @@ class RGBToOlmoEarthS2(BaseTransform):
             "mapped_bands": RGB_TO_SENTINEL2_L2A,
         }
         return results
+
+
+@TRANSFORMS.register_module()
+class RGBToOlmoEarthRGB(BaseTransform):
+    """Map RGB imagery into the native OLMoEarth rgb modality."""
+
+    def __init__(
+        self,
+        num_timesteps: int = 1,
+        rgb_channel_order: str = "RGB",
+        input_value_range: str = "auto",
+    ) -> None:
+        rgb_channel_order = rgb_channel_order.upper()
+        if sorted(rgb_channel_order) != ["B", "G", "R"]:
+            raise ValueError("rgb_channel_order must be a permutation of RGB")
+        if input_value_range not in {"auto", "0_255", "0_1"}:
+            raise ValueError("input_value_range must be auto, 0_255, or 0_1")
+        self.num_timesteps = num_timesteps
+        self.rgb_channel_order = rgb_channel_order
+        self.input_value_range = input_value_range
+        self.band_names = list(get_modality_bands("rgb"))
+
+    def _to_unit_scale(self, image: np.ndarray) -> np.ndarray:
+        mode = self.input_value_range
+        if mode == "auto":
+            max_value = float(np.nanmax(image)) if image.size else 0.0
+            mode = "0_1" if max_value <= 1.5 else "0_255"
+        if mode == "0_255":
+            return image / 255.0
+        return image
+
+    def transform(self, results: dict[str, Any]) -> dict[str, Any]:
+        image = results["img"].astype(np.float32, copy=False)
+        expected = 3 * self.num_timesteps
+        if image.ndim != 3 or image.shape[-1] != expected:
+            raise ValueError(
+                f"Expected RGB image with {expected} channels, "
+                f"got {image.shape}"
+            )
+        image = self._to_unit_scale(image)
+        height, width = image.shape[:2]
+        out = np.zeros(
+            (height, width, len(self.band_names) * self.num_timesteps),
+            dtype=np.float32,
+        )
+        channel_to_index = {
+            name: idx for idx, name in enumerate(self.rgb_channel_order)
+        }
+        for t in range(self.num_timesteps):
+            rgb_base = t * 3
+            for band_name in ("B", "G", "R"):
+                rgb_idx = rgb_base + channel_to_index[band_name]
+                band_idx = self.band_names.index(band_name)
+                out_idx = band_idx * self.num_timesteps + t
+                out[..., out_idx] = image[..., rgb_idx]
+
+        results["img"] = out
+        results["olmoearth_modality"] = "rgb"
+        results["olmoearth_num_timesteps"] = self.num_timesteps
+        results["olmoearth_band_names"] = self.band_names
+        results["present_bands"] = ["B", "G", "R"]
+        results["olmoearth_rgb_adapter"] = {
+            "rgb_channel_order": self.rgb_channel_order,
+            "input_value_range": self.input_value_range,
+            "mapped_bands": {"B": "B", "G": "G", "R": "R"},
+            "filled_bands": {"NIR": 0.0},
+        }
+        return results

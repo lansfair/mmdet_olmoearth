@@ -6,6 +6,7 @@ from .necks import OlmoEarthMultiLevelNeck
 from .transforms import (
     LoadOlmoEarthTifFromFile,
     OlmoEarthNormalize,
+    RGBToOlmoEarthRGB,
     RGBToOlmoEarthS2,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "OlmoEarthMultiLevelNeck",
     "LoadOlmoEarthTifFromFile",
     "OlmoEarthNormalize",
+    "RGBToOlmoEarthRGB",
     "RGBToOlmoEarthS2",
 ]

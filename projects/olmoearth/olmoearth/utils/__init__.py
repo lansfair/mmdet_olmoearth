@@ -1,6 +1,7 @@
 from .checkpoint import build_olmoearth_model
 from .modalities import (
     MODALITY_SPECS,
+    RGB_BANDS,
     RGB_TO_SENTINEL2_L2A,
     SENTINEL1_BANDS,
     SENTINEL2_L2A_BANDS,
@@ -10,6 +11,7 @@ from .modalities import (
 
 __all__ = [
     "MODALITY_SPECS",
+    "RGB_BANDS",
     "RGB_TO_SENTINEL2_L2A",
     "SENTINEL1_BANDS",
     "SENTINEL2_L2A_BANDS",
