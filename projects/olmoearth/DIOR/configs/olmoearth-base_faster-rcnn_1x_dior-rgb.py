@@ -48,7 +48,7 @@ train_pipeline = [
     dict(type="Resize", scale=(800, 800), keep_ratio=True),
     dict(type="RandomFlip", prob=0.5),
     dict(
-        type="RGBToOlmoEarthS2",
+        type="RGBToOlmoEarthRGB",
         num_timesteps=num_timesteps,
         rgb_channel_order="BGR",
         input_value_range="0_255",
@@ -77,7 +77,7 @@ test_pipeline = [
     dict(type="Resize", scale=(800, 800), keep_ratio=True),
     dict(type="LoadAnnotations", with_bbox=True),
     dict(
-        type="RGBToOlmoEarthS2",
+        type="RGBToOlmoEarthRGB",
         num_timesteps=num_timesteps,
         rgb_channel_order="BGR",
         input_value_range="0_255",
@@ -157,7 +157,7 @@ model = dict(
         type="OlmoEarthBackbone",
         model_config_path=model_config_path,
         init_cfg=dict(type="Pretrained", checkpoint=weights_path),
-        modality="sentinel2_l2a",
+        modality="rgb",
         patch_size=patch_size,
         num_timesteps=num_timesteps,
         out_channels=out_channels,
