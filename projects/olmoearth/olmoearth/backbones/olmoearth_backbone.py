@@ -42,6 +42,7 @@ class OlmoEarthBackbone(BaseModule):
         out_channels: int = 768,
         pooling_type: str = "mean",
         fast_pass: bool | None = None,
+        trainable_bands: list[str] | None = None,
         init_cfg: dict | None = None,
     ) -> None:
         super().__init__(init_cfg=init_cfg)
@@ -52,12 +53,14 @@ class OlmoEarthBackbone(BaseModule):
         self.pooling_type = pooling_type
         self.fast_pass = fast_pass
         self.band_names = list(get_modality_bands(modality))
+        self.trainable_bands = trainable_bands
         self.sample_field = get_sample_field(modality)
         self.model = build_olmoearth_model(model_config_path)
         self.encoder = self.model.encoder
         self.encoder.remove_masked_tokens = (
             self._remove_masked_tokens_sort_compat
         )
+        self._freeze_unused_pretrain_parameters()
         self._batch_metainfo: list[dict[str, Any]] | None = None
 
     @staticmethod
@@ -153,6 +156,55 @@ class OlmoEarthBackbone(BaseModule):
                     resolved.append([_normalize_band_name(x) for x in group])
             return resolved
         return [[_normalize_band_name(band)] for band in self.band_names]
+
+    def _default_trainable_bands(self) -> set[str]:
+        if self.trainable_bands is not None:
+            return {_normalize_band_name(band) for band in self.trainable_bands}
+        if self.modality == "rgb":
+            return {"B", "G", "R"}
+        return {_normalize_band_name(band) for band in self.band_names}
+
+    def _freeze_unused_pretrain_parameters(self) -> None:
+        """Freeze OLMoEarth branches unused by downstream detection."""
+
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        trainable_bands = self._default_trainable_bands()
+        bandsets = self._get_bandsets()
+
+        for name, param in self.encoder.named_parameters():
+            if name.startswith("project_and_aggregate."):
+                continue
+
+            if name.startswith("patch_embeddings.per_modality_embeddings."):
+                parts = name.split(".")
+                if len(parts) < 4 or parts[2] != self.sample_field:
+                    continue
+                match = re.search(r"__(\d+)$", parts[3])
+                if match is not None:
+                    bandset_idx = int(match.group(1))
+                    if bandset_idx >= len(bandsets):
+                        continue
+                    bandset = {
+                        _normalize_band_name(band)
+                        for band in bandsets[bandset_idx]
+                    }
+                    if not bandset.intersection(trainable_bands):
+                        continue
+                param.requires_grad = True
+                continue
+
+            if name.startswith(
+                "composite_encodings.per_modality_channel_embeddings."
+            ):
+                parts = name.split(".")
+                if len(parts) < 3 or parts[2] != self.sample_field:
+                    continue
+                param.requires_grad = True
+                continue
+
+            param.requires_grad = True
 
     def _default_timestamps(
         self,

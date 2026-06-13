@@ -33,10 +33,10 @@ classes = (
 )
 num_classes = len(classes)
 num_timesteps = 1
-patch_size = 8
+patch_size = 16
 out_channels = 768
 fpn_channels = 256
-featmap_strides = [patch_size, patch_size * 2, patch_size * 4, patch_size * 8]
+featmap_strides = [4, 8, 16, 32]
 anchor_sizes = [32, 64, 128, 256]
 
 metainfo = dict(classes=classes)
@@ -50,7 +50,7 @@ train_pipeline = [
     dict(
         type="RGBToOlmoEarthRGB",
         num_timesteps=num_timesteps,
-        rgb_channel_order="BGR",
+        rgb_channel_order="RGB",
         input_value_range="0_255",
     ),
     dict(
@@ -79,7 +79,7 @@ test_pipeline = [
     dict(
         type="RGBToOlmoEarthRGB",
         num_timesteps=num_timesteps,
-        rgb_channel_order="BGR",
+        rgb_channel_order="RGB",
         input_value_range="0_255",
     ),
     dict(
@@ -163,7 +163,7 @@ model = dict(
         type="OlmoEarthMultiLevelNeck",
         in_channels=out_channels,
         out_channels=fpn_channels,
-        scales=[1.0, 0.5, 0.25, 0.125],
+        scales=[4, 2, 1, 0.5],
     ),
     rpn_head=dict(
         type="RPNHead",
