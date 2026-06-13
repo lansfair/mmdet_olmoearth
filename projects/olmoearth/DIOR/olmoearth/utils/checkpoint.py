@@ -88,6 +88,19 @@ def _patch_torch_23_for_olmoearth_import() -> None:
             dist.DeviceMesh = DeviceMesh
         patched = True
 
+    try:
+        import torch.distributed.tensor as dist_tensor
+
+        if not hasattr(dist_tensor, "distribute_tensor"):
+
+            def distribute_tensor(tensor, *args, **kwargs):
+                return tensor
+
+            dist_tensor.distribute_tensor = distribute_tensor
+            patched = True
+    except Exception:
+        pass
+
     parent_name = "torch.distributed._composable"
     module_name = f"{parent_name}.replicate"
     if module_name not in sys.modules:
