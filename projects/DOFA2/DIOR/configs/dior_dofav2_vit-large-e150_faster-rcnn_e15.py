@@ -80,6 +80,14 @@ model = dict(
     )
 )
 
+# The upstream object-detection recipe exposes layers [5, 9, 15, 21] from
+# ViT-L. Parameters after the last exposed block do not contribute to the
+# detection loss, so multi-GPU training must allow unused parameters.
+model_wrapper_cfg = dict(
+    type='MMDistributedDataParallel',
+    find_unused_parameters=True,
+)
+
 param_scheduler = [
     dict(
         type='CosineAnnealingLR',
