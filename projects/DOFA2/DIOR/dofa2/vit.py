@@ -147,14 +147,13 @@ class DynamicMLPOFAV2(nn.Module):
         return x, waves
 
 
-@MODELS.register_module(force=True)
+@MODELS.register_module()
 class DOFAV2ViT(BaseModule):
     """DOFA v2 ViT backbone for MMDetection.
 
-    DOFAv2 follows Terratorch's patch14 setup and uses timm's dynamic ViT
-    position embedding path. With ``convert_patch_14_to_16=True`` it resizes
-    the learned dynamic patch kernels to 16x16 and uses stride 16, matching the
-    Terratorch object-detection configs.
+    The implementation follows the upstream TerraTorch object-detection
+    recipe: a DOFA+ patch14 checkpoint, optional patch14-to-patch16 dynamic
+    kernel conversion, and timm's dynamic positional embedding path.
     """
 
     def __init__(
@@ -169,18 +168,36 @@ class DOFAV2ViT(BaseModule):
         wv_planes=128,
         mlp_ratio=4.0,
         drop_path_rate=0.1,
-        frozen_stages=True,
+        freeze_backbone=False,
+        frozen_stages=None,
         init_cfg=None,
     ):
-        super().__init__(init_cfg=init_cfg)
+        # Load once below against this wrapper. The official checkpoint stores
+        # dynamic patch keys at the top level and transformer keys below
+        # ``model.``, matching this module's state dict.
+        super().__init__(init_cfg=None)
+        self.pretrained_init_cfg = init_cfg
         arch_settings = utils.get_arch_setting(arch)
         self.effective_patch_size = 16 if convert_patch_14_to_16 else patch_size
         self.embed_dim = arch_settings["embed_dim"]
         self.depth = arch_settings["depth"]
-        self.frozen_stages = frozen_stages
+        if frozen_stages is not None:
+            if frozen_stages not in (False, True, 0, 1):
+                raise ValueError(
+                    "Legacy frozen_stages only accepts 0/1. "
+                    "Use freeze_backbone=True/False.")
+            freeze_backbone = bool(frozen_stages)
+        self.freeze_backbone = freeze_backbone
         self.pos_interpolation_mode = pos_interpolation_mode
         self.convert_patch_14_to_16 = convert_patch_14_to_16
         self.out_indices = tuple(out_indices or arch_settings["default_out_indices"])
+        if len(set(self.out_indices)) != len(self.out_indices):
+            raise ValueError("out_indices must not contain duplicates.")
+        invalid = [index for index in self.out_indices
+                   if not 0 <= index < self.depth]
+        if invalid:
+            raise ValueError(
+                f"out_indices {invalid} are outside [0, {self.depth - 1}].")
 
         wavelengths = utils.get_wavelenghts(model_bands)
         self.register_buffer(
@@ -199,6 +216,7 @@ class DOFAV2ViT(BaseModule):
         self.patch_embed.num_patches = (img_size // self.effective_patch_size) ** 2
 
         model_args = dict(
+            img_size=224,
             patch_size=patch_size,
             embed_dim=self.embed_dim,
             depth=self.depth,
@@ -212,25 +230,58 @@ class DOFAV2ViT(BaseModule):
         )
         self.model = VisionTransformer(**model_args)
         del self.model.patch_embed.proj
+        self._apply_freezing()
 
     def init_weights(self):
-        retval = super().init_weights()
-        checkpoint_path = None
-        if isinstance(self.init_cfg, dict) and self.init_cfg.get("type") == "Pretrained":
-            checkpoint_path = self.init_cfg.get("checkpoint")
+        super().init_weights()
+        init_cfg = self.pretrained_init_cfg
+        if init_cfg is not None:
+            if init_cfg.get("type") != "Pretrained":
+                raise ValueError(
+                    'DOFAV2ViT only supports init_cfg type="Pretrained".')
+            checkpoint_path = init_cfg.get("checkpoint")
+            if not checkpoint_path:
+                raise ValueError(
+                    "A non-empty checkpoint path is required in init_cfg.")
+            checkpoint = CheckpointLoader.load_checkpoint(
+                checkpoint_path, map_location="cpu")
+            if not isinstance(checkpoint, dict):
+                raise TypeError("The DOFAv2 checkpoint must contain a dict.")
+            checkpoint = self._unwrap_checkpoint(checkpoint)
+            message = self.load_state_dict(checkpoint, strict=False)
+            logging.getLogger(__name__).info(
+                "Loaded DOFAv2 checkpoint %s: %s",
+                checkpoint_path,
+                message,
+            )
+        self._apply_freezing()
 
-        checkpoint = CheckpointLoader.load_checkpoint(checkpoint_path, map_location="cpu")
-        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-            checkpoint = checkpoint["state_dict"]
-        checkpoint = {
-            key.replace("module.", "", 1): value
-            for key, value in checkpoint.items()
-        }
-        msg = self.load_state_dict(checkpoint, strict=False)
-        for params in self.parameters():
-            params.requires_grad = not self.frozen_stages
-        logging.info(f"Loaded DOFAv2 checkpoint: {msg}")
-        return retval
+    @staticmethod
+    def _unwrap_checkpoint(checkpoint):
+        for container_key in ("state_dict",):
+            if (container_key in checkpoint
+                    and isinstance(checkpoint[container_key], dict)):
+                checkpoint = checkpoint[container_key]
+        cleaned = {}
+        for raw_key, value in checkpoint.items():
+            key = raw_key
+            for prefix in ("module.", "backbone."):
+                if key.startswith(prefix):
+                    key = key[len(prefix):]
+            cleaned[key] = value
+        return cleaned
+
+    def _apply_freezing(self):
+        if not self.freeze_backbone:
+            return
+        self.eval()
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+
+    def train(self, mode=True):
+        super().train(mode)
+        self._apply_freezing()
+        return self
 
     def _patch_hw(self, x):
         input_h, input_w = x.shape[-2:]
@@ -246,6 +297,10 @@ class DOFAV2ViT(BaseModule):
         return x.permute(0, 3, 1, 2).contiguous()
 
     def forward(self, x):
+        if x.shape[1] != self.wavelengths.numel():
+            raise ValueError(
+                f"DOFAv2 received {x.shape[1]} channels but "
+                f"{self.wavelengths.numel()} model_bands were configured.")
         hw_shape = self._patch_hw(x)
         wavelengths = self.wavelengths.to(device=x.device, dtype=torch.float32)
 

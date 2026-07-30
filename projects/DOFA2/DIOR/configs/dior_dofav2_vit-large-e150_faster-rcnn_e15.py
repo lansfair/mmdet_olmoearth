@@ -1,5 +1,3 @@
-import os
-
 _base_ = [
     '../../../../configs/_base_/models/faster-rcnn_r50_fpn.py',
     '../../../../configs/_base_/default_runtime.py',
@@ -8,7 +6,7 @@ _base_ = [
 
 custom_imports = dict(imports=['projects.DOFA2.DIOR.dofa2'])
 
-DATA_SIZE = 800
+DATA_SIZE = 896
 
 BANDS_MEAN = [
     123.675, # R
@@ -22,7 +20,7 @@ BANDS_STD = [
 ]
 
 BACKBONE_ARCH_EMBED_DIM = {'base': 768, 'large': 1024}
-BACKBONE_OUT_INDICES = [5, 11, 17, 23]
+BACKBONE_OUT_INDICES = [5, 9, 15, 21]
 BACKBONE_ARCH = 'large'
 
 NECK_IN_CHANNELS = [BACKBONE_ARCH_EMBED_DIM[BACKBONE_ARCH]] * len(BACKBONE_OUT_INDICES)
@@ -33,14 +31,18 @@ NUM_CLASSES = 20
 
 TRAIN_EPOCH = 15
 
-CHECKPOINT = os.path.join(os.environ.get('MM_ARCHIVE_CKPT_HOME'), 'dofav2_vit_large_e150.pth')
+CHECKPOINT = (
+    '/mnt/ht2-nas2/EO_test/openmmlab-archive/pretrained/'
+    'dofav2_vit_large_e150.pth'
+)
 
 
 model = dict(
     data_preprocessor=dict(
-        mean=BANDS_MEAN, 
-        std=BANDS_STD, 
-        bgr_to_rgb=True
+        mean=BANDS_MEAN,
+        std=BANDS_STD,
+        bgr_to_rgb=True,
+        pad_size_divisor=32,
     ),
     backbone=dict(
         _delete_=True,
@@ -53,8 +55,8 @@ model = dict(
         pos_interpolation_mode="bicubic",
         convert_patch_14_to_16=True,
         drop_path_rate=0.1,
-        frozen_stages=False,
-        init_cfg=dict(type='Pretrained', checkpoint=CHECKPOINT)
+        freeze_backbone=False,
+        init_cfg=dict(type='Pretrained', checkpoint=CHECKPOINT),
     ),
     neck=dict(
         _delete_=True,
@@ -78,9 +80,31 @@ model = dict(
     )
 )
 
-param_scheduler = [dict(type='CosineAnnealingLR', by_epoch=True, begin=0, end=TRAIN_EPOCH)]
-optim_wrapper = dict(type='OptimWrapper', optimizer=dict(type='AdamW', lr=1e-4, weight_decay=1e-2))
+param_scheduler = [
+    dict(
+        type='CosineAnnealingLR',
+        by_epoch=True,
+        begin=0,
+        end=TRAIN_EPOCH,
+        eta_min=1e-6,
+    )
+]
+optim_wrapper = dict(
+    type='OptimWrapper',
+    optimizer=dict(type='AdamW', lr=1e-4, weight_decay=1e-2),
+)
 
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=TRAIN_EPOCH, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
+
+default_hooks = dict(
+    checkpoint=dict(
+        type='CheckpointHook',
+        interval=1,
+        save_best='auto',
+        max_keep_ckpts=3,
+    ),
+)
+auto_scale_lr = dict(enable=False, base_batch_size=16)
+randomness = dict(seed=0)
