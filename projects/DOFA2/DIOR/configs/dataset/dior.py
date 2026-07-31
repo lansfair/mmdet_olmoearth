@@ -14,6 +14,21 @@ train_pipeline = [
     dict(type='RandomFlip', prob=0.5),
     dict(type='PackDetInputs')
 ]
+train_dataset = dict(
+    type=DATASET_TYPE,
+    data_root=DATA_ROOT,
+    data_prefix=dict(sub_data_root=''),
+    img_subdir='Images/trainval/',
+    ann_subdir='Annotations/trainval/',
+    filter_cfg=dict(
+        filter_empty_gt=True,
+        min_size=32,
+        bbox_min_size=1,
+    ),
+    pipeline=train_pipeline,
+    backend_args=BACKEND_ARGS,
+)
+
 train_dataloader = dict(
     batch_size=BATCH_SIZE,
     num_workers=8,
@@ -21,21 +36,16 @@ train_dataloader = dict(
     sampler=dict(type='DefaultSampler', shuffle=True),
     batch_sampler=dict(type='AspectRatioBatchSampler'),
     dataset=dict(
-        type=DATASET_TYPE,
-        data_root=DATA_ROOT,
-        data_prefix=dict(sub_data_root=''),
-        img_subdir='Images/trainval/',
-        ann_subdir='Annotations/trainval/',
-        ann_file='ImageSets/Main/train.txt',
-        filter_cfg=dict(
-            filter_empty_gt=True,
-            min_size=32,
-            bbox_min_size=1,
-        ),
-        pipeline=train_pipeline,
-        backend_args=BACKEND_ARGS,
+        **train_dataset,
+        ann_file='ImageSets/Main/trainval.txt',
     ),
 )
+
+# The paper-style DIOR protocol trains on all 11,725 train+val images and
+# evaluates only once on the held-out test set. Keeping val.txt as a validation
+# split here would both reduce the training set and leak training samples into
+# model selection.
+val_dataloader = None
 
 
 test_pipeline = [
@@ -53,25 +63,6 @@ test_pipeline = [
         ),
     ),
 ]
-val_dataloader = dict(
-    batch_size=1,
-    num_workers=4,
-    persistent_workers=True,
-    drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
-    dataset=dict(
-        type=DATASET_TYPE,
-        data_root=DATA_ROOT,
-        data_prefix=dict(sub_data_root=''),
-        img_subdir='Images/trainval/',
-        ann_subdir='Annotations/trainval/',
-        ann_file='ImageSets/Main/val.txt',
-        test_mode=True,
-        pipeline=test_pipeline,
-        backend_args=BACKEND_ARGS,
-    ),
-)
-
 test_dataloader = dict(
     batch_size=1,
     num_workers=4,
@@ -93,5 +84,5 @@ test_dataloader = dict(
 
 # Pascal VOC2007 uses `11points` as default evaluate mode, while PASCAL
 # VOC2012 defaults to use 'area'.
-val_evaluator = dict(type='VOCMetric', metric='mAP', eval_mode='11points')
-test_evaluator = val_evaluator
+val_evaluator = None
+test_evaluator = dict(type='VOCMetric', metric='mAP', eval_mode='11points')

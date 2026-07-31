@@ -8,16 +8,12 @@ custom_imports = dict(imports=['projects.DOFA2.DIOR.dofa2'])
 
 DATA_SIZE = 896
 
-BANDS_MEAN = [
-    123.675, # R
-    116.280, # G
-    103.530  # B
-]
-BANDS_STD = [
-    58.395, # R
-    57.120, # G
-    57.375  # B
-]
+# TerraTorch's detection data path converts uint8 RGB imagery to float tensors
+# in [0, 1], while its Faster R-CNN transform uses identity normalization.
+# MMDetection receives uint8 imagery, so dividing by 255 reproduces that input
+# scale without applying ImageNet statistics.
+BANDS_MEAN = [0.0, 0.0, 0.0]
+BANDS_STD = [255.0, 255.0, 255.0]
 
 BACKBONE_ARCH_EMBED_DIM = {'base': 768, 'large': 1024}
 BACKBONE_OUT_INDICES = [5, 9, 15, 21]
@@ -53,7 +49,9 @@ model = dict(
         model_bands=["RED", "GREEN", "BLUE"],
         out_indices=BACKBONE_OUT_INDICES,
         pos_interpolation_mode="bicubic",
-        convert_patch_14_to_16=True,
+        # Keep DOFAv2's native patch-14 embedding. Kernel interpolation to
+        # patch 16 is optional in TerraTorch and is disabled by default.
+        convert_patch_14_to_16=False,
         drop_path_rate=0.1,
         freeze_backbone=False,
         init_cfg=dict(type='Pretrained', checkpoint=CHECKPOINT),
@@ -64,7 +62,9 @@ model = dict(
         in_channels=NECK_IN_CHANNELS,
         out_channels=NECK_OUT_CHANNELS,
         num_outs=5,
-        norm_cfg=dict(type="GN", num_groups=32, requires_grad=True),
+        # torchvision.ops.FeaturePyramidNetwork, used by the public
+        # TerraTorch detection path, does not add normalization to FPN convs.
+        norm_cfg=None,
     ),
     rpn_head=dict(
         in_channels=NECK_OUT_CHANNELS, 
@@ -88,30 +88,40 @@ model_wrapper_cfg = dict(
     find_unused_parameters=True,
 )
 
+# The public TerraTorch detection recipe warms up from one tenth of the peak
+# learning rate and then follows a cosine decay. For a 15-epoch DIOR run, one
+# warm-up epoch is the closest epoch-granularity equivalent to pct_start=0.05.
 param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=0.1,
+        by_epoch=True,
+        begin=0,
+        end=1,
+    ),
     dict(
         type='CosineAnnealingLR',
         by_epoch=True,
-        begin=0,
+        begin=1,
         end=TRAIN_EPOCH,
-        eta_min=1e-6,
-    )
+        eta_min=1e-7,
+    ),
 ]
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=1e-4, weight_decay=1e-2),
 )
 
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=TRAIN_EPOCH, val_interval=1)
-val_cfg = dict(type='ValLoop')
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=TRAIN_EPOCH)
+val_cfg = None
 test_cfg = dict(type='TestLoop')
 
 default_hooks = dict(
     checkpoint=dict(
         type='CheckpointHook',
         interval=1,
-        save_best='auto',
         max_keep_ckpts=3,
+        save_last=True,
     ),
 )
 auto_scale_lr = dict(enable=False, base_batch_size=16)
