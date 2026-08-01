@@ -88,7 +88,8 @@ model_wrapper_cfg = dict(
     find_unused_parameters=True,
 )
 
-# Match the public TerraTorch DOFAv2 detection recipe directly.  Using a
+# Match the public TerraTorch DOFAv2 detection recipe with its two warm-up
+# epochs, while shortening the complete schedule from 40 to 15 epochs. Using a
 # separate LinearLR followed by CosineAnnealingLR leaves the cosine scheduler
 # based at the warm-up LR in MMEngine, so the LR can remain at 1e-5.
 param_scheduler = [
@@ -96,7 +97,7 @@ param_scheduler = [
         type='OneCycleLR',
         eta_max=1e-4,
         total_steps=TRAIN_EPOCH,
-        pct_start=0.05,
+        pct_start=2 / TRAIN_EPOCH,
         anneal_strategy='cos',
         div_factor=10.0,
         final_div_factor=1000.0,
