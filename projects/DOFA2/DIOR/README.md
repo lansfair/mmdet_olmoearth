@@ -73,6 +73,15 @@ bash tools/dist_train.sh \
   8
 ```
 
+The 30-epoch eight-GPU variant doubles the optimizer-update count to roughly
+match 15 epochs with the paper's global batch size 16:
+
+```bash
+bash tools/dist_train.sh \
+  projects/DOFA2/DIOR/configs/dior_dofav2_vit-large-e150_faster-rcnn_8xb4_fp16_e30.py \
+  8
+```
+
 ```bash
 bash tools/dist_test.sh \
   projects/DOFA2/DIOR/configs/dior_dofav2_vit-large-e150_faster-rcnn_e15.py \
