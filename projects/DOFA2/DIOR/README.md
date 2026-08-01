@@ -17,11 +17,11 @@ The public DOFA+ paper reports the following DIOR protocol:
 The paper does not publish a standalone DIOR configuration file. The migration
 therefore combines the public DOFAv2 backbone defaults with TerraTorch's public
 object-detection path: native patch-14 embedding, transformer outputs
-`[5, 9, 15, 21]`, `[0, 1]` RGB input, a learned pyramidal projection, and a
-normalization-free FPN. The 896-pixel input size is inherited from TerraTorch's
-public DOFA detection example; it is not specified by the DIOR paper. The
-schedule uses one warm-up epoch followed by cosine decay, approximating the
-public example's OneCycle warm-up and decay at the paper's 15-epoch duration.
+`[5, 9, 15, 21]`, RGB ImageNet normalization, a learned pyramidal projection,
+and a normalization-free FPN. The 896-pixel input size is inherited from
+TerraTorch's public DOFA detection example; it is not specified by the DIOR
+paper. The schedule uses OneCycleLR and preserves the public example's two
+warm-up epochs within the paper's 15-epoch duration.
 
 With four GPUs, `batch_size=4` per GPU gives the paper's global batch size 16.
 The backbone is not frozen. The paper-style run trains on all 11,725
@@ -58,6 +58,16 @@ Use MMDetection's existing distributed scripts from the repository root:
 bash tools/dist_train.sh \
   projects/DOFA2/DIOR/configs/dior_dofav2_vit-large-e150_faster-rcnn_e15.py \
   4
+```
+
+For eight A100 GPUs, the dedicated configuration fixes the per-GPU batch size
+at 4, uses BF16 mixed precision, and linearly scales the peak learning rate to
+2e-4 for global batch size 32:
+
+```bash
+bash tools/dist_train.sh \
+  projects/DOFA2/DIOR/configs/dior_dofav2_vit-large-e150_faster-rcnn_8xb4_bf16_e15.py \
+  8
 ```
 
 ```bash
