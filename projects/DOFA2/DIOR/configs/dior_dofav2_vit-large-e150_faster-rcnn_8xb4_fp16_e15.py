@@ -2,11 +2,13 @@ _base_ = ['./dior_dofav2_vit-large-e150_faster-rcnn_e15.py']
 
 # Eight GPUs x four images per GPU. The four-GPU base recipe has a global
 # batch size of 16 and lr=1e-4, so linear scaling gives lr=2e-4 here.
+# FP16 matches TerraTorch's public `16-mixed` detection recipe and is supported
+# by the MMCV CUDA RoIAlign kernel used in this environment.
 optim_wrapper = dict(
     _delete_=True,
     type='AmpOptimWrapper',
-    dtype='bfloat16',
-    loss_scale=1.0,
+    dtype='float16',
+    loss_scale='dynamic',
     optimizer=dict(type='AdamW', lr=2e-4, weight_decay=1e-2),
 )
 

@@ -61,12 +61,12 @@ bash tools/dist_train.sh \
 ```
 
 For eight A100 GPUs, the dedicated configuration fixes the per-GPU batch size
-at 4, uses BF16 mixed precision, and linearly scales the peak learning rate to
-2e-4 for global batch size 32:
+at 4, uses FP16 mixed precision with dynamic loss scaling, and linearly scales
+the peak learning rate to 2e-4 for global batch size 32:
 
 ```bash
 bash tools/dist_train.sh \
-  projects/DOFA2/DIOR/configs/dior_dofav2_vit-large-e150_faster-rcnn_8xb4_bf16_e15.py \
+  projects/DOFA2/DIOR/configs/dior_dofav2_vit-large-e150_faster-rcnn_8xb4_fp16_e15.py \
   8
 ```
 
