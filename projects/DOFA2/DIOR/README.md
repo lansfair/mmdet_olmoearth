@@ -16,12 +16,15 @@ The public DOFA+ paper reports the following DIOR protocol:
 
 The paper does not publish a standalone DIOR configuration file. The migration
 therefore combines the public DOFAv2 backbone defaults with TerraTorch's public
-object-detection path: native patch-14 embedding, transformer outputs
+object-detection path: pretrained patch-14 dynamic kernels converted to
+patch-16, bilinear positional-embedding interpolation, transformer outputs
 `[5, 9, 15, 21]`, RGB ImageNet normalization, a learned pyramidal projection,
-and a normalization-free FPN. The 896-pixel input size is inherited from
-TerraTorch's public DOFA detection example; it is not specified by the DIOR
-paper. The schedule uses OneCycleLR and preserves the public example's two
-warm-up epochs within the paper's 15-epoch duration.
+and a normalization-free FPN. With an 896-pixel input, patch-16 produces a
+56x56 token grid and the pyramid aligns with detector strides
+`[4, 8, 16, 32, 64]`. The input size is inherited from TerraTorch's public DOFA
+detection example; it is not specified by the DIOR paper. The schedule uses
+OneCycleLR and preserves the public example's two warm-up epochs within the
+paper's 15-epoch duration.
 
 With four GPUs, `batch_size=4` per GPU gives the paper's global batch size 16.
 The backbone is not frozen. The paper-style run trains on all 11,725

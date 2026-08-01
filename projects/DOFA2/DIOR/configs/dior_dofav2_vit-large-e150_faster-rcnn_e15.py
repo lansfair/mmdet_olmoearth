@@ -48,10 +48,12 @@ model = dict(
         patch_size=14,
         model_bands=["RED", "GREEN", "BLUE"],
         out_indices=BACKBONE_OUT_INDICES,
-        pos_interpolation_mode="bicubic",
-        # Keep DOFAv2's native patch-14 embedding. Kernel interpolation to
-        # patch 16 is optional in TerraTorch and is disabled by default.
-        convert_patch_14_to_16=False,
+        pos_interpolation_mode="bilinear",
+        # Match TerraTorch's public DOFAv2 detection recipe: interpolate the
+        # pretrained 14x14 dynamic kernels to 16x16 and use stride 16.  At an
+        # 896-pixel input this produces a 56x56 token grid, so the learned FPN
+        # aligns exactly with the detector strides [4, 8, 16, 32, 64].
+        convert_patch_14_to_16=True,
         drop_path_rate=0.1,
         freeze_backbone=False,
         init_cfg=dict(type='Pretrained', checkpoint=CHECKPOINT),
