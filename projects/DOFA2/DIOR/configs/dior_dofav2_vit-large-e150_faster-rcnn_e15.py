@@ -8,12 +8,12 @@ custom_imports = dict(imports=['projects.DOFA2.DIOR.dofa2'])
 
 DATA_SIZE = 896
 
-# TerraTorch's detection data path converts uint8 RGB imagery to float tensors
-# in [0, 1], while its Faster R-CNN transform uses identity normalization.
-# MMDetection receives uint8 imagery, so dividing by 255 reproduces that input
-# scale without applying ImageNet statistics.
-BANDS_MEAN = [0.0, 0.0, 0.0]
-BANDS_STD = [255.0, 255.0, 255.0]
+# The upstream TerraTorch VHR10 data module first divides uint8 RGB by 255,
+# then applies ImageNet normalization.  MMDetection consumes uint8 BGR and
+# `bgr_to_rgb=True` converts it to RGB before applying these equivalent
+# 0-255-domain statistics.
+BANDS_MEAN = [123.675, 116.28, 103.53]
+BANDS_STD = [58.395, 57.12, 57.375]
 
 BACKBONE_ARCH_EMBED_DIM = {'base': 768, 'large': 1024}
 BACKBONE_OUT_INDICES = [5, 9, 15, 21]
@@ -88,23 +88,21 @@ model_wrapper_cfg = dict(
     find_unused_parameters=True,
 )
 
-# The public TerraTorch detection recipe warms up from one tenth of the peak
-# learning rate and then follows a cosine decay. For a 15-epoch DIOR run, one
-# warm-up epoch is the closest epoch-granularity equivalent to pct_start=0.05.
+# Match the public TerraTorch DOFAv2 detection recipe directly.  Using a
+# separate LinearLR followed by CosineAnnealingLR leaves the cosine scheduler
+# based at the warm-up LR in MMEngine, so the LR can remain at 1e-5.
 param_scheduler = [
     dict(
-        type='LinearLR',
-        start_factor=0.1,
+        type='OneCycleLR',
+        eta_max=1e-4,
+        total_steps=TRAIN_EPOCH,
+        pct_start=0.05,
+        anneal_strategy='cos',
+        div_factor=10.0,
+        final_div_factor=1000.0,
         by_epoch=True,
         begin=0,
-        end=1,
-    ),
-    dict(
-        type='CosineAnnealingLR',
-        by_epoch=True,
-        begin=1,
         end=TRAIN_EPOCH,
-        eta_min=1e-7,
     ),
 ]
 optim_wrapper = dict(
